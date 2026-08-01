@@ -1,14 +1,22 @@
 import "server-only";
 import type { NextRequest, NextResponse } from "next/server";
 import type { z } from "zod";
+import { or, isNull, gt } from "drizzle-orm";
 import type { Permission } from "@zts/database";
-import { getDb, type schema } from "@zts/database";
-import { validateSessionToken, verifyCsrfToken, isSudoActive } from "@zts/auth";
+import { getDb, ipAllowlist, ipBlocks, type schema } from "@zts/database";
+import {
+  permissionsRequireMfa,
+  validateSessionToken,
+  verifyCsrfToken,
+  isSudoActive,
+} from "@zts/auth";
 import {
   PermissionError,
   RATE_LIMITS,
   getRedis,
   getUserPermissions,
+  isIpBlocked,
+  isIpInCidr,
   rateLimit,
   requirePermission,
   type RateLimitPolicy,
@@ -56,6 +64,8 @@ interface AuthedOptions<TBody, TQuery> extends SharedOptions<TBody, TQuery> {
   permission?: Permission;
   /** Require an active sudo-mode session (recent re-authentication). */
   requireSudo?: boolean;
+  /** Allow access even when mandatory MFA is not yet enrolled (enrollment routes). */
+  allowWithoutMfa?: boolean;
 }
 
 type RouteHandler = (
@@ -87,6 +97,61 @@ async function resolveAuth(req: NextRequest): Promise<AuthInfo | null> {
   if (!valid) return null;
   const permissions = await getUserPermissions(db, valid.user.id);
   return { user: valid.user, session: valid.session, permissions };
+}
+
+/** Paths that remain reachable when an IP allowlist is configured (monitors). */
+function isIpCheckExempt(pathname: string): boolean {
+  return pathname === "/api/health" || pathname.startsWith("/api/health/");
+}
+
+async function enforceIpAccess(req: NextRequest, ip: string | null): Promise<NextResponse | null> {
+  if (isIpCheckExempt(req.nextUrl.pathname)) return null;
+
+  const db = getDb();
+  const now = new Date();
+
+  const denyRows = await db
+    .select({ cidr: ipBlocks.cidr })
+    .from(ipBlocks)
+    .where(or(isNull(ipBlocks.expiresAt), gt(ipBlocks.expiresAt, now)));
+  if (isIpBlocked(
+    ip,
+    denyRows.map((r) => r.cidr),
+  )) {
+    return jsonError(403, "ip_blocked", "Access denied from this IP address.");
+  }
+
+  const allowRows = await db
+    .select({ cidr: ipAllowlist.cidr })
+    .from(ipAllowlist)
+    .where(or(isNull(ipAllowlist.expiresAt), gt(ipAllowlist.expiresAt, now)));
+  if (allowRows.length > 0) {
+    if (!ip || !allowRows.some((r) => isIpInCidr(ip, r.cidr))) {
+      return jsonError(403, "ip_not_allowed", "Access denied from this IP address.");
+    }
+  }
+
+  return null;
+}
+
+const MFA_ENROLLMENT_ALLOWLIST = [
+  "/api/auth/me",
+  "/api/auth/logout",
+  "/api/auth/logout-all",
+  "/api/auth/sudo",
+  "/api/auth/change-password",
+  "/api/auth/mfa",
+  "/api/auth/mfa/setup",
+  "/api/auth/mfa/enable",
+  "/api/auth/mfa/disable",
+  "/api/auth/webauthn",
+  "/api/auth/sessions",
+];
+
+function isMfaEnrollmentAllowed(pathname: string): boolean {
+  return MFA_ENROLLMENT_ALLOWLIST.some(
+    (p) => pathname === p || pathname.startsWith(`${p}/`),
+  );
 }
 
 async function applyRateLimit<TBody, TQuery>(
@@ -174,7 +239,7 @@ function toErrorResponse(err: unknown, req: NextRequest): NextResponse {
 
 /**
  * Authenticated route wrapper. Security pipeline, all server-side:
- * rate limiting -> authentication -> CSRF -> RBAC -> sudo -> validation.
+ * IP checks -> rate limiting -> authentication -> CSRF -> mandatory MFA -> RBAC -> sudo -> validation.
  */
 export function createApiHandler<TBody = unknown, TQuery = unknown>(
   options: AuthedOptions<TBody, TQuery>,
@@ -184,6 +249,9 @@ export function createApiHandler<TBody = unknown, TQuery = unknown>(
     const ip = getClientIp(req);
     const userAgent = req.headers.get("user-agent");
     try {
+      const ipDenied = await enforceIpAccess(req, ip);
+      if (ipDenied) return ipDenied;
+
       const limited = await applyRateLimit(req, ip, options, false);
       if (limited) return limited;
 
@@ -203,6 +271,19 @@ export function createApiHandler<TBody = unknown, TQuery = unknown>(
         ) {
           return jsonError(403, "csrf", "Invalid or missing CSRF token.");
         }
+      }
+
+      if (
+        !options.allowWithoutMfa &&
+        permissionsRequireMfa(auth.permissions) &&
+        !auth.user.mfaEnabled &&
+        !isMfaEnrollmentAllowed(req.nextUrl.pathname)
+      ) {
+        return jsonError(
+          403,
+          "mfa_enrollment_required",
+          "Multi-factor authentication is required for this account. Enroll TOTP or a passkey in Settings.",
+        );
       }
 
       if (options.permission) {
@@ -233,6 +314,9 @@ export function createPublicApiHandler<TBody = unknown, TQuery = unknown>(
     const ip = getClientIp(req);
     const userAgent = req.headers.get("user-agent");
     try {
+      const ipDenied = await enforceIpAccess(req, ip);
+      if (ipDenied) return ipDenied;
+
       const limited = await applyRateLimit(req, ip, options, true);
       if (limited) return limited;
 

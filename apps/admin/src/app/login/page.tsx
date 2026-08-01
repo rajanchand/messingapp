@@ -7,7 +7,10 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { ShieldCheck } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { startAuthentication } from "@simplewebauthn/browser";
+import type { PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
+import { KeyRound, ShieldCheck } from "lucide-react";
 import { api, ApiClientError } from "@/lib/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,29 +30,79 @@ const credentialsSchema = z.object({
 type Credentials = z.infer<typeof credentialsSchema>;
 
 const mfaSchema = z.object({
-  code: z.string().min(6, "Enter your 6-digit code or a recovery code"),
+  code: z
+    .string()
+    .min(6, "Enter the 6-digit authenticator code or a recovery code")
+    .max(32),
 });
 type MfaInput = z.infer<typeof mfaSchema>;
 
 const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME ?? "Zero Trust Security";
 
+function SsoComingSoonButton() {
+  const oidc = useQuery({
+    queryKey: ["oidc-status"],
+    queryFn: () =>
+      api.get<{ label: string; enabled: boolean; hint: string; status: string }>(
+        "/api/auth/oidc",
+      ),
+    retry: false,
+  });
+
+  return (
+    <div className="space-y-1">
+      <Button
+        type="button"
+        variant="secondary"
+        className="w-full"
+        disabled={!oidc.data?.enabled}
+        onClick={async () => {
+          try {
+            await api.post("/api/auth/oidc");
+          } catch (err) {
+            toast.message(oidc.data?.label ?? "Single sign-on (coming soon)", {
+              description:
+                err instanceof ApiClientError
+                  ? err.message
+                  : (oidc.data?.hint ?? "See docs/MAS-OIDC.md"),
+            });
+          }
+        }}
+      >
+        {oidc.data?.label ?? "Single sign-on (coming soon)"}
+      </Button>
+      <p className="text-center text-xs text-muted-foreground">
+        {oidc.data?.enabled
+          ? "OIDC configured — full login flow pending."
+          : "Admin SSO is deferred. Local password + MFA is the break-glass path."}
+      </p>
+    </div>
+  );
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [step, setStep] = useState<"credentials" | "mfa">("credentials");
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
 
   const credForm = useForm<Credentials>({ resolver: zodResolver(credentialsSchema) });
   const mfaForm = useForm<MfaInput>({ resolver: zodResolver(mfaSchema) });
 
-  function completeLogin() {
-    router.replace("/");
+  function completeLogin(enrollmentRequired = false) {
+    router.replace(enrollmentRequired ? "/settings?mfa=required" : "/");
     router.refresh();
   }
 
   async function onCredentials(values: Credentials) {
     try {
-      const result = await api.post<{ status: "ok" | "mfa_required" }>("/api/auth/login", values);
+      const result = await api.post<{
+        status: "ok" | "mfa_required" | "mfa_enrollment_required";
+      }>("/api/auth/login", values);
       if (result.status === "mfa_required") {
         setStep("mfa");
+      } else if (result.status === "mfa_enrollment_required") {
+        toast.warning("Multi-factor authentication is required. Enroll TOTP or a passkey.");
+        completeLogin(true);
       } else {
         completeLogin();
       }
@@ -68,7 +121,7 @@ export default function LoginPage() {
     try {
       const result = await api.post<{ status: "ok"; usedRecoveryCode: boolean }>(
         "/api/auth/mfa",
-        values,
+        { code: values.code.trim() },
       );
       if (result.usedRecoveryCode) {
         toast.warning("You used a recovery code. Consider regenerating your recovery codes.");
@@ -78,10 +131,46 @@ export default function LoginPage() {
       if (err instanceof ApiClientError && err.code === "mfa_expired") {
         toast.error("Session expired. Please log in again.");
         setStep("credentials");
-      } else {
-        toast.error("Invalid authentication code.");
         mfaForm.reset();
+      } else if (err instanceof ApiClientError && err.code === "locked") {
+        toast.error(err.message);
+        setStep("credentials");
+        mfaForm.reset();
+      } else if (err instanceof ApiClientError && err.code === "rate_limited") {
+        toast.error("Too many MFA attempts. Please wait a few minutes.");
+      } else {
+        toast.error("Invalid authenticator code. Check your app and try again.");
+        mfaForm.setValue("code", "");
       }
+    }
+  }
+
+  async function onPasskeyLogin(asSecondFactor: boolean) {
+    setPasskeyBusy(true);
+    try {
+      const begin = await api.post<{
+        options: PublicKeyCredentialRequestOptionsJSON;
+        challengeToken: string;
+      }>("/api/auth/webauthn/login", {
+        action: "begin",
+        username: asSecondFactor ? undefined : credForm.getValues("username") || undefined,
+      });
+      const assertion = await startAuthentication({ optionsJSON: begin.options });
+      await api.post("/api/auth/webauthn/login", {
+        action: "finish",
+        challengeToken: begin.challengeToken,
+        response: assertion,
+        asSecondFactor,
+      });
+      completeLogin();
+    } catch (err) {
+      if (err instanceof ApiClientError) {
+        toast.error(err.message);
+      } else {
+        toast.error("Passkey authentication failed or was cancelled.");
+      }
+    } finally {
+      setPasskeyBusy(false);
     }
   }
 
@@ -100,11 +189,9 @@ export default function LoginPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Sign in</CardTitle>
-              <CardDescription>Use your administrator account.</CardDescription>
+              <CardDescription>Use your administrator account or a passkey.</CardDescription>
             </CardHeader>
-            <CardContent>
-              {/* method="post" so a pre-hydration native submit never puts
-                  credentials in the URL/query string. */}
+            <CardContent className="space-y-4">
               <form
                 className="space-y-4"
                 method="post"
@@ -147,6 +234,25 @@ export default function LoginPage() {
                   Sign in
                 </Button>
               </form>
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-card px-2 text-muted-foreground">or</span>
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                loading={passkeyBusy}
+                onClick={() => onPasskeyLogin(false)}
+              >
+                <KeyRound className="size-4" />
+                Sign in with passkey
+              </Button>
+              <SsoComingSoonButton />
             </CardContent>
           </Card>
         ) : (
@@ -154,13 +260,14 @@ export default function LoginPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
                 <ShieldCheck className="size-4 text-primary" />
-                Two-factor authentication
+                Authenticator app
               </CardTitle>
               <CardDescription>
-                Enter the 6-digit code from your authenticator app, or a recovery code.
+                Open Google Authenticator, Authy, 1Password, or a similar app and enter the
+                6-digit code for this account.
               </CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-4">
               <form
                 className="space-y-4"
                 method="post"
@@ -168,13 +275,14 @@ export default function LoginPage() {
                 noValidate
               >
                 <div className="space-y-2">
-                  <Label htmlFor="code">Authentication code</Label>
+                  <Label htmlFor="code">6-digit code</Label>
                   <Input
                     id="code"
                     inputMode="numeric"
                     autoComplete="one-time-code"
                     autoFocus
                     placeholder="123456"
+                    maxLength={32}
                     {...mfaForm.register("code")}
                   />
                   {mfaForm.formState.errors.code ? (
@@ -182,19 +290,43 @@ export default function LoginPage() {
                       {mfaForm.formState.errors.code.message}
                     </p>
                   ) : null}
+                  <p className="text-xs text-muted-foreground">
+                    Lost your authenticator? Enter a one-time recovery code instead.
+                  </p>
                 </div>
                 <Button type="submit" className="w-full" loading={mfaForm.formState.isSubmitting}>
-                  Verify
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  className="w-full"
-                  onClick={() => setStep("credentials")}
-                >
-                  Back to sign in
+                  Verify and sign in
                 </Button>
               </form>
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-card px-2 text-muted-foreground">or</span>
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                loading={passkeyBusy}
+                onClick={() => onPasskeyLogin(true)}
+              >
+                <KeyRound className="size-4" />
+                Use passkey instead
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full"
+                onClick={() => {
+                  setStep("credentials");
+                  mfaForm.reset();
+                }}
+              >
+                Back to sign in
+              </Button>
             </CardContent>
           </Card>
         )}

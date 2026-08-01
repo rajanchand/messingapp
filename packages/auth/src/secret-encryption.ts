@@ -2,9 +2,10 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 
 /**
  * AES-256-GCM encryption for secrets at rest (e.g. TOTP seeds).
- * The data key is derived from SESSION_SECRET via HKDF with a fixed info
- * label, so rotating SESSION_SECRET invalidates stored MFA secrets - this is
- * documented in SECURITY.md.
+ * The data key is derived via HKDF with a fixed info label from
+ * `MFA_ENCRYPTION_KEY` when set, otherwise `SESSION_SECRET` (legacy).
+ * Rotating the MFA key without re-encrypting stored ciphertext forces
+ * TOTP re-enrollment — documented in SECURITY.md / DEPLOYMENT.md.
  */
 function deriveKey(secret: string): Buffer {
   return Buffer.from(hkdfSync("sha256", secret, "zts-mfa-secret", "aes-256-gcm-key", 32));

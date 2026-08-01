@@ -14,6 +14,8 @@ export interface Me {
   };
   roles: { id: string; slug: string; name: string }[];
   permissions: string[];
+  /** True when RBAC requires MFA and the user has not enrolled yet. */
+  requiresMfaEnrollment?: boolean;
   csrfToken: string;
   sudoActive: boolean;
   sessionCreatedAt: string;

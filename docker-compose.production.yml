@@ -1,5 +1,5 @@
 # ============================================================
-# Production deployment skeleton (Phase 6 completes this).
+# Production deployment (Phase 6 / Wave 1).
 #
 # SAFETY:
 # - Never exposes PostgreSQL or Redis publicly.
@@ -17,7 +17,7 @@
 # ============================================================
 services:
   zts-admin:
-    image: ghcr.io/YOUR_GITHUB_USERNAME/zts-admin:latest
+    image: ghcr.io/${GHCR_OWNER:-YOUR_GITHUB_USERNAME}/zts-admin:${IMAGE_TAG:-latest}
     container_name: zts-admin
     restart: unless-stopped
     env_file: .env.production
@@ -32,9 +32,35 @@ services:
     ports:
       # Bind to localhost only; the reverse proxy terminates TLS on 443.
       - "127.0.0.1:3000:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:3000/api/health >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  zts-automation-worker:
+    image: ghcr.io/${GHCR_OWNER:-YOUR_GITHUB_USERNAME}/zts-automation-worker:${IMAGE_TAG:-latest}
+    container_name: zts-automation-worker
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      AUTOMATION_CONCURRENCY: ${AUTOMATION_CONCURRENCY:-5}
+    depends_on:
+      zts-postgres:
+        condition: service_healthy
+      zts-redis:
+        condition: service_healthy
+    networks:
+      - zts-internal
+      # - matrix
 
   zts-migrate:
-    image: ghcr.io/YOUR_GITHUB_USERNAME/zts-admin-migrator:latest
+    image: ghcr.io/${GHCR_OWNER:-YOUR_GITHUB_USERNAME}/zts-admin-migrator:${IMAGE_TAG:-latest}
     profiles: ["tools"]
     env_file: .env.production
     depends_on:
@@ -65,13 +91,25 @@ services:
     image: redis:7-alpine
     container_name: zts-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    # Prefer REDIS_PASSWORD from the host env. Without it Redis still starts
+    # (useful for first bring-up); production MUST set a password and point
+    # REDIS_URL at redis://:password@zts-redis:6379 — see DEPLOYMENT.md.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-changeme-set-REDIS_PASSWORD}
     volumes:
       - zts_redis_data:/data
     networks:
       - zts-internal
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli -a \"$${REDIS_PASSWORD:-changeme-set-REDIS_PASSWORD}\" ping | grep -q PONG",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5

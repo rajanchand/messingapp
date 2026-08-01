@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -69,6 +70,10 @@ export default function SettingsPage() {
   const { data: me, isLoading } = useMe();
 
   const [mfaDialogOpen, setMfaDialogOpen] = useState(false);
+  const [mfaFromQuery, setMfaFromQuery] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("mfa") === "required";
+  });
   const [mfaStep, setMfaStep] = useState<"password" | "verify" | "recovery">("password");
   const [mfaPassword, setMfaPassword] = useState("");
   const [enrollment, setEnrollment] = useState<{ otpauthUrl: string; secret: string } | null>(
@@ -79,6 +84,8 @@ export default function SettingsPage() {
   const [disableMfaOpen, setDisableMfaOpen] = useState(false);
   const [logoutAllOpen, setLogoutAllOpen] = useState(false);
 
+  const showMfaDialog =
+    mfaDialogOpen || (mfaFromQuery && !!me && !me.user.mfaEnabled);
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: () => api.get<{ sessions: SessionRow[] }>("/api/auth/sessions"),
@@ -115,7 +122,7 @@ export default function SettingsPage() {
   async function confirmMfa() {
     try {
       const result = await api.post<{ recoveryCodes: string[] }>("/api/auth/mfa/enable", {
-        code: mfaCode,
+        code: mfaCode.trim(),
       });
       setRecoveryCodes(result.recoveryCodes);
       setMfaStep("recovery");
@@ -137,6 +144,7 @@ export default function SettingsPage() {
 
   function closeMfaDialog() {
     setMfaDialogOpen(false);
+    setMfaFromQuery(false);
     setMfaStep("password");
     setMfaPassword("");
     setMfaCode("");
@@ -148,8 +156,29 @@ export default function SettingsPage() {
     <div className="max-w-3xl space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+        <p className="text-sm text-muted-foreground">
+          Account security, sessions, and MFA.{" "}
+          <Link href="/settings/homeserver-policy" className="text-primary hover:underline">
+            Homeserver policy
+          </Link>
+        </p>
         <p className="text-sm text-muted-foreground">Your account and security preferences.</p>
       </div>
+
+      {!isLoading && me && !me.user.mfaEnabled ? (
+        <Card className="border-destructive/40 bg-destructive/5">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base text-destructive">
+              <ShieldCheck className="size-4" />
+              Multi-factor authentication required
+            </CardTitle>
+            <CardDescription>
+              Privileged admin roles must enroll TOTP or a passkey before using the rest of the
+              console. Use the sections below to enroll now.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>
@@ -247,10 +276,11 @@ export default function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <ShieldCheck className="size-4" /> Two-factor authentication (TOTP)
+            <ShieldCheck className="size-4" /> Authenticator app (TOTP)
           </CardTitle>
           <CardDescription>
-            Protect your account with a TOTP app. Coexists with passkeys.
+            Primary second factor: Google Authenticator, Authy, 1Password, and similar apps.
+            Passkeys below are optional.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -265,7 +295,7 @@ export default function SettingsPage() {
             </div>
           ) : (
             <Button onClick={() => setMfaDialogOpen(true)}>
-              <ShieldCheck /> Enable two-factor
+              <ShieldCheck /> Set up authenticator app
             </Button>
           )}
         </CardContent>
@@ -336,7 +366,7 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Dialog open={mfaDialogOpen} onOpenChange={(o) => !o && closeMfaDialog()}>
+      <Dialog open={showMfaDialog} onOpenChange={(o) => !o && closeMfaDialog()}>
         <DialogContent>
           {mfaStep === "password" ? (
             <>
@@ -368,7 +398,8 @@ export default function SettingsPage() {
               <DialogHeader>
                 <DialogTitle>Add to your authenticator app</DialogTitle>
                 <DialogDescription>
-                  Add the secret below to your authenticator app, then enter the 6-digit code.
+                  Scan or enter the secret in Google Authenticator, Authy, or another TOTP app,
+                  then enter the 6-digit code it shows.
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">

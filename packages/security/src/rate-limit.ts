@@ -17,7 +17,8 @@ export interface RateLimitPolicy {
 /** Sensible default policies, keyed for reuse across routes. */
 export const RATE_LIMITS = {
   login: { limit: 10, windowMs: 5 * 60 * 1000 },
-  mfa: { limit: 10, windowMs: 5 * 60 * 1000 },
+  /** TOTP / recovery-code verification — tighter than password login. */
+  mfa: { limit: 5, windowMs: 5 * 60 * 1000 },
   sudo: { limit: 10, windowMs: 5 * 60 * 1000 },
   api: { limit: 300, windowMs: 60 * 1000 },
   mutation: { limit: 60, windowMs: 60 * 1000 },

@@ -27,6 +27,8 @@ export interface LoginContext {
 export type LoginResult =
   | { status: "success"; user: typeof adminUsers.$inferSelect }
   | { status: "mfa_required"; user: typeof adminUsers.$inferSelect }
+  /** Privileged account with no MFA enrolled — session may be issued for enrollment only. */
+  | { status: "mfa_enrollment_required"; user: typeof adminUsers.$inferSelect }
   | { status: "invalid" }
   | { status: "locked"; until: Date };
 
@@ -120,7 +122,8 @@ export async function loginWithPassword(
     return { status: "invalid" };
   }
 
-  // Password OK - reset the failure counter.
+  // Password verified — clear prior password-failure counters. MFA failures
+  // start a fresh counter toward lockout (see verifyMfaChallenge).
   await db
     .update(adminUsers)
     .set({ failedLoginCount: 0, lockedUntil: null, updatedAt: new Date() })
@@ -139,6 +142,20 @@ export async function loginWithPassword(
   return { status: "success", user };
 }
 
+/**
+ * After a password-only success, privileged accounts without MFA must enroll
+ * before using the panel. Callers pass whether the user's RBAC requires MFA.
+ */
+export function applyMandatoryMfaPolicy(
+  result: LoginResult,
+  requiresMfa: boolean,
+): LoginResult {
+  if (result.status === "success" && requiresMfa && !result.user.mfaEnabled) {
+    return { status: "mfa_enrollment_required", user: result.user };
+  }
+  return result;
+}
+
 async function finalizeSuccessfulLogin(
   db: Database,
   userId: string,
@@ -147,17 +164,62 @@ async function finalizeSuccessfulLogin(
 ) {
   await db
     .update(adminUsers)
-    .set({ lastLoginAt: new Date(), updatedAt: new Date() })
+    .set({
+      lastLoginAt: new Date(),
+      failedLoginCount: 0,
+      lockedUntil: null,
+      updatedAt: new Date(),
+    })
     .where(eq(adminUsers.id, userId));
   await recordAttempt(db, { username, userId, success: true, reason: "login" }, ctx);
 }
 
-export type MfaVerifyResult = { ok: true; usedRecoveryCode: boolean } | { ok: false };
+/** Increments failure counters; locks after MAX_FAILED_LOGINS (password or MFA). */
+async function registerAuthFailure(
+  db: Database,
+  user: typeof adminUsers.$inferSelect,
+  reason: string,
+  ctx: LoginContext,
+): Promise<{ locked: true; until: Date } | { locked: false }> {
+  const failedCount = user.failedLoginCount + 1;
+  const lock = failedCount >= MAX_FAILED_LOGINS;
+  const until = lock ? new Date(Date.now() + LOCKOUT_DURATION_MS) : null;
+  await db
+    .update(adminUsers)
+    .set({
+      failedLoginCount: failedCount,
+      lockedUntil: until ?? user.lockedUntil,
+      updatedAt: new Date(),
+    })
+    .where(eq(adminUsers.id, user.id));
+  await recordAttempt(
+    db,
+    { username: user.username, userId: user.id, success: false, reason },
+    ctx,
+  );
+  if (lock && until) {
+    await db.insert(securityEvents).values({
+      type: "ACCOUNT_LOCKED",
+      severity: "warning",
+      userId: user.id,
+      ip: ctx.ip ?? null,
+      userAgent: ctx.userAgent ?? null,
+      metadata: { failedCount, reason },
+    });
+    return { locked: true, until };
+  }
+  return { locked: false };
+}
+
+export type MfaVerifyResult =
+  | { ok: true; usedRecoveryCode: boolean }
+  | { ok: false; locked?: false }
+  | { ok: false; locked: true; until: Date };
 
 /**
  * Verifies a TOTP code or a recovery code for the second factor step.
- * `sessionSecret` is the platform SESSION_SECRET used to decrypt the stored
- * TOTP seed.
+ * `mfaKey` is MFA_ENCRYPTION_KEY (or SESSION_SECRET fallback) used to decrypt
+ * the stored TOTP seed.
  */
 export async function verifyMfaChallenge(
   db: Database,
@@ -171,6 +233,10 @@ export async function verifyMfaChallenge(
   )[0];
   if (!user || !user.isActive || !user.mfaEnabled) return { ok: false };
 
+  if (user.lockedUntil && user.lockedUntil.getTime() > Date.now()) {
+    return { ok: false, locked: true, until: user.lockedUntil };
+  }
+
   const trimmed = code.trim();
 
   // 6-digit codes are TOTP; anything else is treated as a recovery code.
@@ -181,12 +247,10 @@ export async function verifyMfaChallenge(
     if (!cred || !cred.verifiedAt) return { ok: false };
     const secret = decryptSecret(sessionSecret, cred.encryptedSecret);
     if (!(await verifyTotpCode(secret, trimmed))) {
-      await recordAttempt(
-        db,
-        { username: user.username, userId, success: false, reason: "mfa_failed" },
-        ctx,
-      );
-      return { ok: false };
+      const failure = await registerAuthFailure(db, user, "mfa_failed", ctx);
+      return failure.locked
+        ? { ok: false, locked: true, until: failure.until }
+        : { ok: false };
     }
     await db
       .update(mfaCredentials)
@@ -210,12 +274,10 @@ export async function verifyMfaChallenge(
     .limit(1);
   const match = matches[0];
   if (!match) {
-    await recordAttempt(
-      db,
-      { username: user.username, userId, success: false, reason: "recovery_code_failed" },
-      ctx,
-    );
-    return { ok: false };
+    const failure = await registerAuthFailure(db, user, "recovery_code_failed", ctx);
+    return failure.locked
+      ? { ok: false, locked: true, until: failure.until }
+      : { ok: false };
   }
   await db.update(recoveryCodes).set({ usedAt: new Date() }).where(eq(recoveryCodes.id, match.id));
   await db.insert(securityEvents).values({

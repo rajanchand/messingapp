@@ -15,6 +15,15 @@ const serverEnvSchema = z.object({
   SESSION_SECRET: z
     .string()
     .min(32, "SESSION_SECRET must be at least 32 characters of high-entropy data"),
+  /**
+   * Dedicated key for TOTP / integration secret encryption at rest.
+   * Falls back to SESSION_SECRET when unset (dev / legacy). Production
+   * should set a distinct value so session rotation does not wipe MFA seeds.
+   */
+  MFA_ENCRYPTION_KEY: z
+    .string()
+    .min(32, "MFA_ENCRYPTION_KEY must be at least 32 characters")
+    .optional(),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   WEBAUTHN_RP_ID: z.string().optional(),
   WEBAUTHN_RP_ORIGIN: z.string().url().optional(),
@@ -51,4 +60,10 @@ export function getEnv(): ServerEnv {
     cached = parsed.data;
   }
   return cached;
+}
+
+/** Key used to encrypt MFA seeds and related secrets at rest. */
+export function getMfaEncryptionKey(): string {
+  const env = getEnv();
+  return env.MFA_ENCRYPTION_KEY ?? env.SESSION_SECRET;
 }

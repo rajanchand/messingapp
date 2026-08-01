@@ -65,6 +65,8 @@ export default function RoomDetailPage() {
   const permissions = usePermissions();
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteUserId, setInviteUserId] = useState("");
+  const [makeAdminOpen, setMakeAdminOpen] = useState(false);
+  const [makeAdminUserId, setMakeAdminUserId] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [modTarget, setModTarget] = useState<{
     userId: string;
@@ -130,6 +132,44 @@ export default function RoomDetailPage() {
             <Button variant="outline" onClick={() => setInviteOpen(true)}>
               <UserPlus className="size-4" />
               Invite
+            </Button>
+          ) : null}
+          {canModerate ? (
+            <Button
+              variant="outline"
+              onClick={async () => {
+                try {
+                  const res = await api.post<{
+                    token: { inviteUrl: string; rawToken: string };
+                  }>("/api/rooms/invite-links", {
+                    roomId,
+                    maxUses: 10,
+                    expiresInHours: 72,
+                    label: "Operator invite",
+                  });
+                  toast.success("Invite link created (copy once).", {
+                    description: res.token.inviteUrl,
+                    duration: 30_000,
+                  });
+                } catch (err) {
+                  toast.error(
+                    err instanceof ApiClientError ? err.message : "Failed to create invite link.",
+                  );
+                }
+              }}
+            >
+              Invite link
+            </Button>
+          ) : null}
+          {canModerate ? (
+            <Button
+              variant="outline"
+              onClick={() => {
+                setMakeAdminUserId("");
+                setMakeAdminOpen(true);
+              }}
+            >
+              Make room admin
             </Button>
           ) : null}
           {canDelete ? (
@@ -301,6 +341,43 @@ export default function RoomDetailPage() {
         confirmLabel="Delete"
         destructive
         onConfirm={deleteRoom}
+      />
+
+      <ConfirmDialog
+        open={makeAdminOpen}
+        onOpenChange={(o) => {
+          setMakeAdminOpen(o);
+          if (!o) setMakeAdminUserId("");
+        }}
+        title="Make room admin?"
+        description={
+          <div className="space-y-3 pt-2">
+            <p>Grants the user power to administer this room via Synapse make_room_admin.</p>
+            <div className="space-y-2">
+              <Label htmlFor="make-admin-user">Matrix user ID</Label>
+              <Input
+                id="make-admin-user"
+                className="font-mono text-sm"
+                value={makeAdminUserId}
+                onChange={(e) => setMakeAdminUserId(e.target.value)}
+                placeholder="@alice:example.org"
+              />
+            </div>
+          </div>
+        }
+        confirmLabel="Make admin"
+        requireReauth
+        onConfirm={async () => {
+          if (!makeAdminUserId.trim()) {
+            toast.error("Enter a user ID.");
+            throw new Error("empty");
+          }
+          await api.post(`/api/rooms/${encodeURIComponent(roomId)}/make-admin`, {
+            userId: makeAdminUserId.trim(),
+          });
+          toast.success("Room admin granted.");
+          setMakeAdminUserId("");
+        }}
       />
 
       <ConfirmDialog

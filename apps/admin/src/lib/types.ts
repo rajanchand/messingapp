@@ -7,6 +7,7 @@ export interface MatrixUser {
   admin: boolean;
   deactivated: boolean;
   locked: boolean;
+  shadow_banned?: boolean;
   is_guest: boolean;
   user_type: string | null;
   creation_ts: number;
@@ -77,6 +78,7 @@ export interface MatrixRoom {
   public: boolean;
   join_rules?: string | null;
   creator?: string;
+  room_type?: string | null;
 }
 
 export interface RoomsListResponse {

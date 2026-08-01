@@ -7,6 +7,8 @@ import { useEffect, type ReactNode } from "react";
 import {
   Blocks,
   Bot,
+  ClipboardCheck,
+  Flag,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -48,6 +50,8 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/users", label: "Users", icon: Users, permission: "users.read" },
   { href: "/rooms", label: "Rooms", icon: MessagesSquare, permission: "rooms.read" },
+  { href: "/moderation", label: "Moderation", icon: Flag, permission: "reports.read" },
+  { href: "/approvals", label: "Approvals", icon: ClipboardCheck, permission: "approvals.read" },
   { href: "/security", label: "Security", icon: ShieldAlert, permission: "security.read" },
   { href: "/automation", label: "Automation", icon: Bot, permission: "automation.read" },
   { href: "/integrations", label: "Integrations", icon: Blocks, permission: "integrations.read" },
@@ -67,6 +71,12 @@ export function AppShell({ children }: { children: ReactNode }) {
       router.replace("/login");
     }
   }, [isError, router]);
+
+  useEffect(() => {
+    if (!me?.requiresMfaEnrollment) return;
+    if (pathname === "/settings" || pathname.startsWith("/settings/")) return;
+    router.replace("/settings?mfa=required");
+  }, [me?.requiresMfaEnrollment, pathname, router]);
 
   async function handleLogout() {
     try {

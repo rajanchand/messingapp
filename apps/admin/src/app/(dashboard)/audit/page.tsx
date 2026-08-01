@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { Download, Search } from "lucide-react";
+import { toast } from "sonner";
 import { api } from "@/lib/api/client";
 import { formatDate } from "@/lib/utils";
 import type { AuditEntry } from "@/lib/types";
@@ -30,10 +31,35 @@ function useDebounced<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
+async function downloadExport(format: "csv" | "json", actor: string, target: string) {
+  const qs = new URLSearchParams({
+    format,
+    actor,
+    target,
+  });
+  const res = await fetch(`/api/audit/export?${qs.toString()}`, { credentials: "include" });
+  if (!res.ok) {
+    toast.error("Export failed.");
+    return;
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  const filename = match?.[1] ?? `audit-export.${format}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast.success(`Downloaded ${filename}`);
+}
+
 export default function AuditPage() {
   const [actor, setActor] = useState("");
   const [target, setTarget] = useState("");
   const [page, setPage] = useState(1);
+  const [exporting, setExporting] = useState<"csv" | "json" | null>(null);
   const debouncedActor = useDebounced(actor, 300);
   const debouncedTarget = useDebounced(target, 300);
 
@@ -51,11 +77,47 @@ export default function AuditPage() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Audit Logs</h1>
-        <p className="text-sm text-muted-foreground">
-          Append-only trail of every sensitive administrative action.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Audit Logs</h1>
+          <p className="text-sm text-muted-foreground">
+            Append-only trail of every sensitive administrative action.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!!exporting}
+            onClick={async () => {
+              setExporting("csv");
+              try {
+                await downloadExport("csv", debouncedActor, debouncedTarget);
+              } finally {
+                setExporting(null);
+              }
+            }}
+          >
+            <Download className="size-4" />
+            {exporting === "csv" ? "Exporting…" : "Export CSV"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!!exporting}
+            onClick={async () => {
+              setExporting("json");
+              try {
+                await downloadExport("json", debouncedActor, debouncedTarget);
+              } finally {
+                setExporting(null);
+              }
+            }}
+          >
+            <Download className="size-4" />
+            {exporting === "json" ? "Exporting…" : "Export JSON"}
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2">

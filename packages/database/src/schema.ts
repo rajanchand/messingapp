@@ -235,6 +235,23 @@ export const ipBlocks = pgTable(
   (t) => [index("ip_blocks_created_idx").on(t.createdAt)],
 );
 
+/**
+ * Optional admin-panel IP allowlist. When empty, all non-denied IPs may access.
+ * When any row exists, only matching IPs (plus /api/health) are allowed.
+ */
+export const ipAllowlist = pgTable(
+  "ip_allowlist",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cidr: text("cidr").notNull().unique(),
+    reason: text("reason"),
+    createdBy: uuid("created_by").references(() => adminUsers.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (t) => [index("ip_allowlist_created_idx").on(t.createdAt)],
+);
+
 /** Per-admin-user notification channel preferences. */
 export const notificationPreferences = pgTable("notification_preferences", {
   userId: uuid("user_id")
@@ -531,5 +548,64 @@ export const matrixUserProfiles = pgTable(
     index("matrix_user_profiles_email_idx").on(t.email),
     index("matrix_user_profiles_employee_idx").on(t.employeeId),
     index("matrix_user_profiles_department_idx").on(t.department),
+  ],
+);
+
+/**
+ * Dual-control queue for high-impact actions (GDPR erase, mass deactivate).
+ * Requester and reviewer must be different admin users; execution runs on approve.
+ */
+export const pendingApprovals = pgTable(
+  "pending_approvals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** USER_ERASE | MASS_DEACTIVATE | MASS_ERASE | BULK_DEVICE_REVOKE */
+    kind: text("kind").notNull(),
+    /** pending | approved | rejected | executed | cancelled | expired */
+    status: text("status").notNull().default("pending"),
+    summary: text("summary").notNull(),
+    /** Action-specific payload (userIds, erase flag, reason, …). */
+    payload: jsonb("payload").notNull(),
+    reason: text("reason"),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => adminUsers.id, { onDelete: "cascade" }),
+    reviewedBy: uuid("reviewed_by").references(() => adminUsers.id, { onDelete: "set null" }),
+    reviewNote: text("review_note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    executedAt: timestamp("executed_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    error: text("error"),
+  },
+  (t) => [
+    index("pending_approvals_status_idx").on(t.status),
+    index("pending_approvals_kind_idx").on(t.kind),
+    index("pending_approvals_created_idx").on(t.createdAt),
+  ],
+);
+
+/**
+ * Operator-issued room invite tokens (shareable links). Redeemed via Matrix
+ * invite of a resolved user, or shown as a one-time code for operators.
+ */
+export const roomInviteTokens = pgTable(
+  "room_invite_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    roomId: text("room_id").notNull(),
+    /** Opaque token segment used in /invite/{token} links. */
+    tokenHash: text("token_hash").notNull().unique(),
+    label: text("label"),
+    maxUses: integer("max_uses").notNull().default(1),
+    useCount: integer("use_count").notNull().default(0),
+    createdBy: uuid("created_by").references(() => adminUsers.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("room_invite_tokens_room_idx").on(t.roomId),
+    index("room_invite_tokens_created_idx").on(t.createdAt),
   ],
 );

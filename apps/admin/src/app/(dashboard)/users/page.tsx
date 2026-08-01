@@ -63,9 +63,18 @@ const createUserSchema = z.object({
   department: z.string().max(128).optional(),
   subdepartment: z.string().max(128).optional(),
   roleSlug: z.string().max(64).optional(),
-  password: z.string().min(12, "At least 12 characters"),
+  password: z.string().optional(),
+  generateTemporary: z.boolean(),
   admin: z.boolean(),
   sendWelcomeEmail: z.boolean(),
+}).superRefine((v, ctx) => {
+  if (!v.generateTemporary && (!v.password || v.password.length < 12)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["password"],
+      message: "At least 12 characters, or enable generate temporary password",
+    });
+  }
 });
 type CreateUserInput = z.infer<typeof createUserSchema>;
 
@@ -83,11 +92,13 @@ export default function UsersPage() {
   const permissions = usePermissions();
   const canCreate = permissions.has("users.create");
   const canDisable = permissions.has("users.disable");
+  const canErase = permissions.has("users.delete");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"active" | "deactivated" | "all">("active");
   const [from, setFrom] = useState(0);
   const [createOpen, setCreateOpen] = useState(false);
   const [deactivateTarget, setDeactivateTarget] = useState<MatrixUser | null>(null);
+  const [eraseOnDeactivate, setEraseOnDeactivate] = useState(false);
 
   const debouncedSearch = useDebounced(search, 300);
 
@@ -99,16 +110,21 @@ export default function UsersPage() {
       ),
   });
 
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState<"deactivate" | "revoke" | null>(null);
+
   const createForm = useForm<CreateUserInput>({
     resolver: zodResolver(createUserSchema),
     defaultValues: {
       admin: false,
       sendWelcomeEmail: true,
+      generateTemporary: true,
       roleSlug: "user",
       phone: "",
       employeeId: "",
       department: "",
       subdepartment: "",
+      password: "",
     },
   });
 
@@ -122,10 +138,16 @@ export default function UsersPage() {
     mutationFn: (input: CreateUserInput) =>
       api.post<{
         welcomeEmail?: { sent: boolean; skippedReason?: string; error?: string };
+        temporaryPassword?: string;
       }>("/api/users", input),
     onSuccess: (data) => {
       const email = data.welcomeEmail;
-      if (email?.sent) {
+      if (data.temporaryPassword) {
+        toast.success("User created with temporary password.", {
+          description: data.temporaryPassword,
+          duration: 20_000,
+        });
+      } else if (email?.sent) {
         toast.success("User created. Welcome email sent with login details.");
       } else if (email?.skippedReason) {
         toast.success("User created.");
@@ -140,11 +162,13 @@ export default function UsersPage() {
       createForm.reset({
         admin: false,
         sendWelcomeEmail: true,
+        generateTemporary: true,
         roleSlug: "user",
         phone: "",
         employeeId: "",
         department: "",
         subdepartment: "",
+        password: "",
       });
       queryClient.invalidateQueries({ queryKey: ["users"] });
     },
@@ -153,9 +177,48 @@ export default function UsersPage() {
     },
   });
 
+  async function runBulkAction() {
+    const userIds = [...selected];
+    if (userIds.length === 0 || !bulkAction) return;
+    if (bulkAction === "deactivate") {
+      const result = await api.post<{ status: string; approvalId?: string }>(
+        "/api/users/bulk/deactivate",
+        { userIds, erase: false },
+      );
+      toast.success(
+        result.status === "pending_approval"
+          ? "Mass deactivate queued for dual-approval."
+          : "Bulk deactivate submitted.",
+      );
+    } else {
+      const result = await api.post<{ status: string }>("/api/users/bulk/revoke-devices", {
+        userIds,
+      });
+      toast.success(
+        result.status === "pending_approval"
+          ? "Device revoke queued for dual-approval."
+          : "Devices revoked.",
+      );
+    }
+    setSelected(new Set());
+    setBulkAction(null);
+    queryClient.invalidateQueries({ queryKey: ["users"] });
+  }
   async function deactivateUser(user: MatrixUser) {
-    await api.post(`/api/users/${encodeURIComponent(user.name)}/deactivate`, { erase: false });
-    toast.success(`${user.name} deactivated.`);
+    const result = await api.post<{ status: string; approvalId?: string; message?: string }>(
+      `/api/users/${encodeURIComponent(user.name)}/deactivate`,
+      { erase: eraseOnDeactivate },
+    );
+    if (result.status === "pending_approval") {
+      toast.success("Erase queued for second-admin approval.", {
+        description: "Open Approvals for a different admin to confirm.",
+      });
+    } else {
+      toast.success(
+        eraseOnDeactivate ? `${user.name} deactivated and erased.` : `${user.name} deactivated.`,
+      );
+    }
+    setEraseOnDeactivate(false);
     queryClient.invalidateQueries({ queryKey: ["users"] });
   }
 
@@ -179,6 +242,20 @@ export default function UsersPage() {
         ) : null}
       </div>
 
+      {canDisable && selected.size > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+          <span>{selected.size} selected</span>
+          <Button size="sm" variant="outline" onClick={() => setBulkAction("revoke")}>
+            Revoke devices
+          </Button>
+          <Button size="sm" variant="destructive" onClick={() => setBulkAction("deactivate")}>
+            Mass deactivate
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
+            Clear
+          </Button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap gap-2">
         <div className="relative w-full max-w-xs">
           <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
@@ -215,6 +292,7 @@ export default function UsersPage() {
         <Table>
           <TableHeader>
             <TableRow>
+              {canDisable ? <TableHead className="w-10" /> : null}
               <TableHead>User</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="hidden md:table-cell">Created</TableHead>
@@ -226,14 +304,17 @@ export default function UsersPage() {
             {usersQuery.isLoading ? (
               Array.from({ length: 5 }).map((_, i) => (
                 <TableRow key={i}>
-                  <TableCell colSpan={5}>
+                  <TableCell colSpan={canDisable ? 6 : 5}>
                     <Skeleton className="h-8 w-full" />
                   </TableCell>
                 </TableRow>
               ))
             ) : users.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="h-32 text-center text-muted-foreground">
+                <TableCell
+                  colSpan={canDisable ? 6 : 5}
+                  className="h-32 text-center text-muted-foreground"
+                >
                   {usersQuery.isError
                     ? "Failed to load users from the homeserver."
                     : "No users found."}
@@ -242,6 +323,25 @@ export default function UsersPage() {
             ) : (
               users.map((user) => (
                 <TableRow key={user.name}>
+                  {canDisable ? (
+                    <TableCell>
+                      <input
+                        type="checkbox"
+                        className="size-4"
+                        checked={selected.has(user.name)}
+                        disabled={user.deactivated}
+                        onChange={(e) => {
+                          setSelected((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(user.name);
+                            else next.delete(user.name);
+                            return next;
+                          });
+                        }}
+                        aria-label={`Select ${user.name}`}
+                      />
+                    </TableCell>
+                  ) : null}
                   <TableCell>
                     <Link
                       href={`/users/${encodeURIComponent(user.name)}`}
@@ -436,17 +536,29 @@ export default function UsersPage() {
                 </Select>
               </div>
               <div className="space-y-2 sm:col-span-2">
-                <Label htmlFor="new-password">Initial password</Label>
-                <Input
-                  id="new-password"
-                  type="password"
-                  autoComplete="new-password"
-                  {...createForm.register("password")}
-                />
-                {createForm.formState.errors.password ? (
-                  <p className="text-sm text-destructive">
-                    {createForm.formState.errors.password.message}
-                  </p>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="size-4"
+                    {...createForm.register("generateTemporary")}
+                  />
+                  Generate temporary password automatically
+                </label>
+                {!createForm.watch("generateTemporary") ? (
+                  <>
+                    <Label htmlFor="new-password">Initial password</Label>
+                    <Input
+                      id="new-password"
+                      type="password"
+                      autoComplete="new-password"
+                      {...createForm.register("password")}
+                    />
+                    {createForm.formState.errors.password ? (
+                      <p className="text-sm text-destructive">
+                        {createForm.formState.errors.password.message}
+                      </p>
+                    ) : null}
+                  </>
                 ) : null}
               </div>
             </div>
@@ -476,13 +588,61 @@ export default function UsersPage() {
 
       <ConfirmDialog
         open={deactivateTarget !== null}
-        onOpenChange={(open) => !open && setDeactivateTarget(null)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeactivateTarget(null);
+            setEraseOnDeactivate(false);
+          }
+        }}
         title={`Deactivate ${deactivateTarget?.name}?`}
-        description="The user will be logged out of all devices and unable to sign in. This can be reversed later by reactivating the account with a new password."
-        confirmLabel="Deactivate"
+        description={
+          <div className="space-y-3">
+            <p>
+              The user will be logged out of all devices and unable to sign in. This can be reversed
+              later by reactivating the account with a new password.
+            </p>
+            {canErase ? (
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1 size-4"
+                  checked={eraseOnDeactivate}
+                  onChange={(e) => setEraseOnDeactivate(e.target.checked)}
+                />
+                <span>
+                  Permanently erase profile data (GDPR). Queues dual-approval for a second
+                  admin.{" "}
+                  <span className="font-medium text-destructive">Irreversible once approved.</span>
+                </span>
+              </label>
+            ) : null}
+          </div>
+        }
+        confirmLabel={eraseOnDeactivate ? "Deactivate & erase" : "Deactivate"}
         destructive
         requireReauth
         onConfirm={() => (deactivateTarget ? deactivateUser(deactivateTarget) : Promise.resolve())}
+      />
+
+      <ConfirmDialog
+        open={bulkAction !== null}
+        onOpenChange={(open) => !open && setBulkAction(null)}
+        title={
+          bulkAction === "deactivate"
+            ? `Mass deactivate ${selected.size} users?`
+            : `Revoke devices for ${selected.size} users?`
+        }
+        description={
+          bulkAction === "deactivate"
+            ? "Creates a dual-approval request. A second admin must approve before Synapse deactivates these accounts."
+            : selected.size >= 5
+              ? "Large batch — queued for dual-approval."
+              : "Logs out all devices for the selected users immediately (sudo)."
+        }
+        confirmLabel={bulkAction === "deactivate" ? "Request approval" : "Revoke devices"}
+        destructive={bulkAction === "deactivate"}
+        requireReauth
+        onConfirm={runBulkAction}
       />
     </div>
   );

@@ -34,6 +34,8 @@ const createBodySchema = z.object({
   encryption: z.boolean().default(true),
   visibility: z.enum(["public", "private"]).default("private"),
   invite: z.array(z.string().max(255)).max(50).default([]),
+  /** Create as an m.space instead of a normal room. */
+  space: z.boolean().default(false),
 });
 
 export const POST = createApiHandler(
@@ -43,20 +45,21 @@ export const POST = createApiHandler(
       name: body.name,
       topic: body.topic,
       room_alias_name: body.alias,
-      encryption: body.encryption,
+      encryption: body.space ? false : body.encryption,
       visibility: body.visibility,
       invite: body.invite,
       preset: body.visibility === "public" ? "public_chat" : "private_chat",
+      space: body.space,
     });
 
     await writeAuditLog(getDb(), {
       actorId: auth.user.id,
       actor: auth.user.username,
-      action: "ROOM_CREATED",
+      action: body.space ? "SPACE_CREATED" : "ROOM_CREATED",
       target: created.room_id,
       ip,
       userAgent,
-      metadata: { name: body.name, encryption: body.encryption },
+      metadata: { name: body.name, encryption: body.encryption, space: body.space },
     });
 
     const { emitTrigger } = await import("@/lib/automation/emit");
@@ -64,6 +67,7 @@ export const POST = createApiHandler(
       roomId: created.room_id,
       name: body.name,
       actor: auth.user.username,
+      space: body.space,
     });
 
     return jsonOk({ room: created }, { status: 201 });

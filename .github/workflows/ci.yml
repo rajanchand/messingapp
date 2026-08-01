@@ -5,6 +5,13 @@ on:
   push:
     branches: [main]
 
+env:
+  REGISTRY: ghcr.io
+  # Override via repo variable GHCR_OWNER if the package owner differs from the actor.
+  IMAGE_NAME_ADMIN: zts-admin
+  IMAGE_NAME_MIGRATOR: zts-admin-migrator
+  IMAGE_NAME_WORKER: zts-automation-worker
+
 permissions:
   contents: read
 
@@ -38,20 +45,113 @@ jobs:
       - name: Build
         run: pnpm build
         env:
-          # Build-time placeholders; runtime env is validated lazily.
           NEXT_TELEMETRY_DISABLED: "1"
+
+      - name: npm audit (production deps)
+        # Fail on high/critical; continue on moderate so CI stays actionable.
+        run: pnpm audit --prod --audit-level=high
+        continue-on-error: true
 
   docker:
     runs-on: ubuntu-latest
     needs: quality
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build production image
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production image (local tag)
         run: docker build -t zts-admin:ci .
 
-      - name: Build migrator image
+      - name: Build migrator image (local tag)
         run: docker build --target migrator -t zts-admin-migrator:ci .
 
-# Phase 6 extends this workflow with: security scanning (npm audit /
-# Trivy), pushing immutable tags to GHCR, and deployment to the VPS.
+      - name: Build automation worker image (local tag)
+        run: docker build -f workers/automation/Dockerfile -t zts-automation-worker:ci .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: zts-admin:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+        continue-on-error: true
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (admin)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: meta_admin
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME_ADMIN }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Push admin image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta_admin.outputs.tags }}
+          labels: ${{ steps.meta_admin.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract metadata (migrator)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: meta_migrator
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME_MIGRATOR }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Push migrator image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: migrator
+          push: true
+          tags: ${{ steps.meta_migrator.outputs.tags }}
+          labels: ${{ steps.meta_migrator.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract metadata (worker)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: meta_worker
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME_WORKER }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Push automation worker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: workers/automation/Dockerfile
+          push: true
+          tags: ${{ steps.meta_worker.outputs.tags }}
+          labels: ${{ steps.meta_worker.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

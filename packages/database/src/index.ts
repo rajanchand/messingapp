@@ -14,6 +14,7 @@ export {
   recoveryCodes,
   appSettings,
   ipBlocks,
+  ipAllowlist,
   notificationPreferences,
   notifications,
   webauthnCredentials,
@@ -29,6 +30,8 @@ export {
   integrationLogs,
   aiProposals,
   matrixUserProfiles,
+  pendingApprovals,
+  roomInviteTokens,
 } from "./schema";
 export { getDb, type Database } from "./client";
 export { seedRbac } from "./seed";

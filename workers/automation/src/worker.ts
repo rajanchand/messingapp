@@ -11,6 +11,7 @@ import {
   workflowRunSteps,
   notifications,
   adminUsers,
+  ipBlocks,
 } from "@zts/database";
 import { getRedis, writeAuditLog } from "@zts/security";
 import {
@@ -75,6 +76,47 @@ async function runAction(
       const userId = String(config.userId ?? "");
       await getSynapseClient().kickUser(roomId, userId, String(config.reason ?? ""));
       return { roomId, userId };
+    }
+    case "BAN_USER": {
+      const roomId = String(config.roomId ?? "");
+      const userId = String(config.userId ?? "");
+      await getSynapseClient().banUser(roomId, userId, String(config.reason ?? ""));
+      return { roomId, userId };
+    }
+    case "UNBAN_USER": {
+      const roomId = String(config.roomId ?? "");
+      const userId = String(config.userId ?? "");
+      await getSynapseClient().unbanUser(roomId, userId);
+      return { roomId, userId };
+    }
+    case "SHADOW_BAN_USER": {
+      const userId = String(config.userId ?? payload.userId ?? "");
+      const shadowBanned = config.shadowBanned !== false && config.shadowBanned !== "false";
+      await getSynapseClient().setShadowBan(userId, Boolean(shadowBanned));
+      return { userId, shadowBanned: Boolean(shadowBanned) };
+    }
+    case "BLOCK_IP": {
+      const cidr = String(config.cidr ?? payload.ip ?? "");
+      if (!cidr) throw new Error("BLOCK_IP requires cidr or payload.ip");
+      const ttlMinutes = Number(config.ttlMinutes ?? 60);
+      const expiresAt =
+        ttlMinutes > 0 ? new Date(Date.now() + ttlMinutes * 60_000) : null;
+      const [row] = await getDb()
+        .insert(ipBlocks)
+        .values({
+          cidr,
+          reason: String(config.reason ?? "Automation BLOCK_IP"),
+          expiresAt,
+        })
+        .returning()
+        .onConflictDoNothing();
+      await writeAuditLog(getDb(), {
+        actor: "automation",
+        action: "IP_BLOCKED",
+        target: cidr,
+        metadata: { runId: ctx.runId, created: Boolean(row) },
+      });
+      return { cidr, created: Boolean(row) };
     }
     default:
       throw new Error(`Unknown action type: ${action.type}`);

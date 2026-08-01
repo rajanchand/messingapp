@@ -2,6 +2,8 @@
 
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { startAuthentication } from "@simplewebauthn/browser";
+import type { PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 import {
   Dialog,
   DialogContent,
@@ -23,10 +25,9 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   destructive?: boolean;
   /**
-   * Dangerous actions: require the admin to re-enter their password.
+   * Dangerous actions: require the admin to re-enter their password or passkey.
    * Unlocks sudo mode server-side before running the action; the server
-   * independently enforces sudo on the target endpoint. The entered
-   * password is passed to onConfirm for endpoints that verify it again.
+   * independently enforces sudo on the target endpoint.
    */
   requireReauth?: boolean;
   onConfirm: (password?: string) => Promise<void>;
@@ -44,6 +45,7 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
 
   async function handleConfirm() {
     setBusy(true);
@@ -68,8 +70,34 @@ export function ConfirmDialog({
     }
   }
 
+  async function handlePasskeyConfirm() {
+    setPasskeyBusy(true);
+    try {
+      const begin = await api.post<{
+        status: "webauthn_begin";
+        options: PublicKeyCredentialRequestOptionsJSON;
+        challengeToken: string;
+      }>("/api/auth/sudo", { method: "webauthn_begin" });
+      const assertion = await startAuthentication({ optionsJSON: begin.options });
+      await api.post("/api/auth/sudo", {
+        method: "webauthn",
+        challengeToken: begin.challengeToken,
+        response: assertion,
+      });
+      await onConfirm(undefined);
+      onOpenChange(false);
+      setPassword("");
+    } catch (err) {
+      const message =
+        err instanceof ApiClientError ? err.message : "Passkey confirmation failed.";
+      toast.error(message);
+    } finally {
+      setPasskeyBusy(false);
+    }
+  }
+
   return (
-    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
+    <Dialog open={open} onOpenChange={(o) => !busy && !passkeyBusy && onOpenChange(o)}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
@@ -90,14 +118,29 @@ export function ConfirmDialog({
             />
           </div>
         ) : null}
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+        <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-end">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={busy || passkeyBusy}
+          >
             Cancel
           </Button>
+          {requireReauth ? (
+            <Button
+              variant="outline"
+              onClick={handlePasskeyConfirm}
+              loading={passkeyBusy}
+              disabled={busy}
+            >
+              Use passkey
+            </Button>
+          ) : null}
           <Button
             variant={destructive ? "destructive" : "default"}
             onClick={handleConfirm}
             loading={busy}
+            disabled={passkeyBusy}
           >
             {confirmLabel}
           </Button>

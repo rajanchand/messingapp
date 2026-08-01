@@ -8,7 +8,7 @@ import {
   clearMfaPendingCookie,
   setSessionCookie,
 } from "@/lib/api/cookies";
-import { getEnv } from "@/lib/env";
+import { getEnv, getMfaEncryptionKey } from "@/lib/env";
 
 const bodySchema = z.object({
   code: z.string().min(6).max(32),
@@ -30,11 +30,20 @@ export const POST = createPublicApiHandler(
     const userId = payload.value.slice("mfa:".length);
 
     const db = getDb();
-    const result = await verifyMfaChallenge(db, env.SESSION_SECRET, userId, body.code, {
+    const result = await verifyMfaChallenge(db, getMfaEncryptionKey(), userId, body.code, {
       ip,
       userAgent,
     });
     if (!result.ok) {
+      if (result.locked) {
+        const res = jsonError(
+          423,
+          "locked",
+          "Account temporarily locked due to failed authentication attempts. Try again later.",
+        );
+        clearMfaPendingCookie(res);
+        return res;
+      }
       return jsonError(401, "mfa_invalid", "Invalid authentication code.");
     }
 

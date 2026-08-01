@@ -17,6 +17,10 @@ export type {
   CreateRoomBody,
   CreateRoomResponse,
   DeleteRoomResponse,
+  PublicRoom,
+  PublicRoomsResponse,
+  ResolveAliasResponse,
+  HomeserverPolicySnapshot,
   ServerVersionResponse,
   JoinedRoomsResponse,
 } from "./types";

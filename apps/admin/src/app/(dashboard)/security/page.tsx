@@ -60,6 +60,13 @@ interface SecurityOverview {
     createdAt: string;
     expiresAt: string | null;
   }[];
+  ipAllowlist: {
+    id: string;
+    cidr: string;
+    reason: string | null;
+    createdAt: string;
+    expiresAt: string | null;
+  }[];
   lockouts: {
     id: string;
     username: string;
@@ -75,8 +82,11 @@ export default function SecurityPage() {
   const canManage = permissions.has("security.manage");
   const [cidr, setCidr] = useState("");
   const [reason, setReason] = useState("");
+  const [allowCidr, setAllowCidr] = useState("");
+  const [allowReason, setAllowReason] = useState("");
   const [revokeId, setRevokeId] = useState<string | null>(null);
   const [unblockId, setUnblockId] = useState<string | null>(null);
+  const [unallowId, setUnallowId] = useState<string | null>(null);
 
   const overview = useQuery({
     queryKey: ["security-overview"],
@@ -95,6 +105,22 @@ export default function SecurityPage() {
       toast.error(err instanceof ApiClientError ? err.message : "Failed to block IP."),
   });
 
+  const allowMutation = useMutation({
+    mutationFn: () =>
+      api.post("/api/security/ip-allowlist", {
+        cidr: allowCidr,
+        reason: allowReason || undefined,
+      }),
+    onSuccess: () => {
+      toast.success("IP allowlisted.");
+      setAllowCidr("");
+      setAllowReason("");
+      queryClient.invalidateQueries({ queryKey: ["security-overview"] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiClientError ? err.message : "Failed to add allowlist entry."),
+  });
+
   async function revokeSession(sessionId: string) {
     await api.post("/api/security/sessions/revoke", { sessionId });
     toast.success("Session revoked.");
@@ -104,6 +130,12 @@ export default function SecurityPage() {
   async function unblock(id: string) {
     await api.post("/api/security/ip-blocks/remove", { id });
     toast.success("IP unblocked.");
+    queryClient.invalidateQueries({ queryKey: ["security-overview"] });
+  }
+
+  async function unallow(id: string) {
+    await api.post("/api/security/ip-allowlist/remove", { id });
+    toast.success("Allowlist entry removed.");
     queryClient.invalidateQueries({ queryKey: ["security-overview"] });
   }
 
@@ -154,6 +186,8 @@ export default function SecurityPage() {
           <TabsTrigger value="logins">Failed logins</TabsTrigger>
           <TabsTrigger value="sessions">Sessions</TabsTrigger>
           <TabsTrigger value="blocks">IP blocks</TabsTrigger>
+          <TabsTrigger value="allowlist">IP allowlist</TabsTrigger>
+          <TabsTrigger value="anomaly">Anomaly engine</TabsTrigger>
         </TabsList>
 
         <TabsContent value="events" className="mt-4">
@@ -337,6 +371,88 @@ export default function SecurityPage() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        <TabsContent value="allowlist" className="mt-4 space-y-4">
+          <p className="text-sm text-muted-foreground">
+            When empty, all non-blocked IPs may access the panel. When any entry exists, only
+            matching IPs can reach authenticated APIs (<code className="text-xs">/api/health</code>{" "}
+            stays exempt for monitors).
+          </p>
+          {canManage ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Add allowlist entry</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-wrap items-end gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="allow-cidr">IP or CIDR</Label>
+                  <Input
+                    id="allow-cidr"
+                    placeholder="203.0.113.10"
+                    value={allowCidr}
+                    onChange={(e) => setAllowCidr(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="allow-reason">Reason</Label>
+                  <Input
+                    id="allow-reason"
+                    value={allowReason}
+                    onChange={(e) => setAllowReason(e.target.value)}
+                  />
+                </div>
+                <Button
+                  disabled={!allowCidr || allowMutation.isPending}
+                  onClick={() => allowMutation.mutate()}
+                >
+                  Allow
+                </Button>
+              </CardContent>
+            </Card>
+          ) : null}
+          <Card>
+            <CardContent className="pt-6">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>CIDR</TableHead>
+                    <TableHead>Reason</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(data?.ipAllowlist ?? []).length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={4} className="text-center text-muted-foreground">
+                        No allowlist entries (all non-denied IPs allowed).
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    (data?.ipAllowlist ?? []).map((b) => (
+                      <TableRow key={b.id}>
+                        <TableCell className="font-mono text-sm">{b.cidr}</TableCell>
+                        <TableCell>{b.reason ?? "—"}</TableCell>
+                        <TableCell>{formatRelative(b.createdAt)}</TableCell>
+                        <TableCell className="text-right">
+                          {canManage ? (
+                            <Button size="sm" variant="ghost" onClick={() => setUnallowId(b.id)}>
+                              Remove
+                            </Button>
+                          ) : null}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="anomaly" className="mt-4">
+          <AnomalyPanel canManage={canManage} />
+        </TabsContent>
       </Tabs>
 
       <ConfirmDialog
@@ -365,6 +481,141 @@ export default function SecurityPage() {
           setUnblockId(null);
         }}
       />
+
+      <ConfirmDialog
+        open={!!unallowId}
+        onOpenChange={(open) => !open && setUnallowId(null)}
+        title="Remove allowlist entry?"
+        description="If this was the last entry, all non-denied IPs will be allowed again."
+        confirmLabel="Remove"
+        onConfirm={async () => {
+          if (!unallowId) return;
+          await unallow(unallowId);
+          setUnallowId(null);
+        }}
+      />
     </div>
+  );
+}
+
+function AnomalyPanel({ canManage }: { canManage: boolean }) {
+  const queryClient = useQueryClient();
+  const anomaly = useQuery({
+    queryKey: ["anomaly-settings"],
+    queryFn: () =>
+      api.get<{
+        settings: {
+          enabled: boolean;
+          burstFailureThreshold: number;
+          burstWindowMinutes: number;
+          autoBlockEnabled: boolean;
+          autoBlockTtlMinutes: number;
+          notifyAdmins: boolean;
+        };
+        catalogTriggers: string[];
+        catalogActions: string[];
+      }>("/api/security/anomaly"),
+  });
+
+  const [draft, setDraft] = useState<{
+    enabled: boolean;
+    burstFailureThreshold: number;
+    burstWindowMinutes: number;
+    autoBlockEnabled: boolean;
+    autoBlockTtlMinutes: number;
+    notifyAdmins: boolean;
+  } | null>(null);
+
+  const settings = draft ?? anomaly.data?.settings ?? null;
+
+  const save = useMutation({
+    mutationFn: () => {
+      if (!settings) throw new Error("No settings");
+      return api.patch("/api/security/anomaly", settings);
+    },
+    onSuccess: () => {
+      toast.success("Anomaly settings saved.");
+      queryClient.invalidateQueries({ queryKey: ["anomaly-settings"] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiClientError ? err.message : "Failed to save."),
+  });
+
+  if (anomaly.isLoading || !settings) return <Skeleton className="h-40 w-full" />;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Anomaly auto-block</CardTitle>
+        <CardDescription>
+          Burst login failures emit LOGIN_BURST_FAILURES, notify admins, and optionally
+          auto-block the IP (respects allowlist). Wire Automation to BLOCK_IP / NOTIFY_ADMIN.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {(
+          [
+            ["enabled", "Engine enabled"],
+            ["notifyAdmins", "Notify admins on burst / new device"],
+            ["autoBlockEnabled", "Auto-block IP on burst (careful)"],
+          ] as const
+        ).map(([key, label]) => (
+          <label key={key} className="flex items-center justify-between gap-4 text-sm">
+            <span>{label}</span>
+            <input
+              type="checkbox"
+              className="size-4"
+              checked={Boolean(settings[key])}
+              disabled={!canManage}
+              onChange={(e) => setDraft({ ...settings, [key]: e.target.checked })}
+            />
+          </label>
+        ))}
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="space-y-1">
+            <Label>Burst threshold</Label>
+            <Input
+              type="number"
+              value={settings.burstFailureThreshold}
+              disabled={!canManage}
+              onChange={(e) =>
+                setDraft({ ...settings, burstFailureThreshold: Number(e.target.value) })
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label>Window (minutes)</Label>
+            <Input
+              type="number"
+              value={settings.burstWindowMinutes}
+              disabled={!canManage}
+              onChange={(e) =>
+                setDraft({ ...settings, burstWindowMinutes: Number(e.target.value) })
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label>Auto-block TTL (min)</Label>
+            <Input
+              type="number"
+              value={settings.autoBlockTtlMinutes}
+              disabled={!canManage}
+              onChange={(e) =>
+                setDraft({ ...settings, autoBlockTtlMinutes: Number(e.target.value) })
+              }
+            />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Triggers: {(anomaly.data?.catalogTriggers ?? []).join(", ")}. Actions:{" "}
+          {(anomaly.data?.catalogActions ?? []).join(", ")}.
+        </p>
+        {canManage ? (
+          <Button loading={save.isPending} onClick={() => save.mutate()}>
+            Save anomaly settings
+          </Button>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }

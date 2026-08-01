@@ -6,6 +6,7 @@ import {
   securityEvents,
   sessions,
   ipBlocks,
+  ipAllowlist,
   adminUsers,
 } from "@zts/database";
 import { createApiHandler } from "@/lib/api/handler";
@@ -21,7 +22,7 @@ export const GET = createApiHandler(
     const db = getDb();
     const since = new Date(Date.now() - query.days * 86_400_000);
 
-    const [failedLogins, events, activeSessions, blocks, lockouts] = await Promise.all([
+    const [failedLogins, events, activeSessions, blocks, allowlist, lockouts] = await Promise.all([
       db
         .select()
         .from(loginAttempts)
@@ -51,6 +52,7 @@ export const GET = createApiHandler(
         .orderBy(desc(sessions.lastSeenAt))
         .limit(100),
       db.select().from(ipBlocks).orderBy(desc(ipBlocks.createdAt)).limit(100),
+      db.select().from(ipAllowlist).orderBy(desc(ipAllowlist.createdAt)).limit(100),
       db
         .select({
           id: adminUsers.id,
@@ -84,6 +86,7 @@ export const GET = createApiHandler(
       events,
       sessions: activeSessions,
       ipBlocks: blocks,
+      ipAllowlist: allowlist,
       lockouts,
       suspiciousIps,
     });

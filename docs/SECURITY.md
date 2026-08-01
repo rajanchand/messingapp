@@ -8,18 +8,21 @@
   Only the SHA-256 hash is persisted. Absolute lifetime 12 h, idle timeout 60 min. Sessions
   are revocable individually or in bulk ("sign out everywhere").
 - **Account lockout**: 5 consecutive failures lock the account for 15 minutes and emit an
-  `ACCOUNT_LOCKED` security event. Unknown usernames burn an equivalent Argon2 verification
+  `ACCOUNT_LOCKED` security event. Failed TOTP / recovery-code attempts during the MFA step
+  count toward the same lockout. Unknown usernames burn an equivalent Argon2 verification
   to prevent timing-based user enumeration.
-- **MFA (TOTP)**: opt-in per account. Seeds are encrypted at rest with AES-256-GCM using a
-  key derived (HKDF-SHA256) from `SESSION_SECRET`. Ten single-use recovery codes are issued
-  once and stored only as hashes. **Rotating `SESSION_SECRET` invalidates stored TOTP seeds**;
-  users must re-enroll (documented operational trade-off).
-- **Sudo mode**: dangerous operations (deactivation, password resets, MFA setup) require
-  re-authentication; the resulting sudo window lasts 10 minutes and is enforced
-  **server-side** on each protected endpoint.
-- **WebAuthn/passkeys**: enrollable alongside TOTP. Only credential IDs and public keys are
-  stored (`webauthn_credentials`). Challenges live in Redis with a short TTL.
-- **IP blocks**: admin-panel CIDR denylist (`ip_blocks`) managed from Security Centre.
+- **MFA (TOTP)**: mandatory for privileged admin roles (see `permissionsRequireMfa`). Seeds are
+  encrypted at rest with AES-256-GCM using a key derived (HKDF-SHA256) from
+  `MFA_ENCRYPTION_KEY` when set, otherwise `SESSION_SECRET` (legacy). Ten single-use recovery
+  codes are issued once and stored only as hashes. Prefer a dedicated `MFA_ENCRYPTION_KEY` in
+  production so rotating `SESSION_SECRET` does not invalidate TOTP seeds.
+  Authenticator-app codes are the primary login second factor; passkeys are optional.
+- **Sudo mode**: dangerous operations require re-authentication via password **or passkey**; the
+  resulting sudo window lasts 10 minutes and is enforced **server-side** on each protected endpoint.
+- **WebAuthn/passkeys**: enrollable alongside TOTP; usable for login, MFA step-up, and sudo.
+  Challenges are HMAC-signed expiring tokens (not Redis). Passkey enrollment sets `mfaEnabled`.
+- **IP blocks**: admin-panel CIDR denylist (`ip_blocks`) and optional allowlist (`ip_allowlist`)
+  managed from Security Centre and enforced on all API handlers (`/api/health` exempt).
 - **Automation**: workflows are idempotent, capped (max actions / timeout / cascade depth),
   and executed by BullMQ workers. Integration secrets use AES-256-GCM (`encryptSecret`).
 - **AI assistant**: read-only tools only; privileged actions go through `ai_proposals`
@@ -41,8 +44,9 @@ with `requirePermission()` in every route. UI hiding is cosmetic; the server is 
 
 ## Rate limiting
 
-Fixed-window counters in Redis, keyed per policy + client IP: login/MFA/sudo 10 per 5 min,
-mutations 60/min, reads 300/min. Auth-critical limiters **fail closed** if Redis is down.
+Fixed-window counters in Redis, keyed per policy + client IP: login/sudo 10 per 5 min,
+MFA 5 per 5 min, mutations 60/min, reads 300/min. Auth-critical limiters **fail closed**
+if Redis is down.
 
 ## Secrets
 
@@ -56,7 +60,26 @@ mutations 60/min, reads 300/min. Auth-critical limiters **fail closed** if Redis
 
 Every sensitive action writes an append-only entry: actor, action, target, IP, user agent,
 result, redacted metadata, timestamp. The application exposes no update/delete paths for
-audit rows. Never logged: passwords, tokens, secrets, encryption keys, message contents.
+audit rows. Export via `GET /api/audit/export?format=csv|json` (capped). For immutable
+off-site copies see [BACKUP.md](./BACKUP.md) (S3 Object Lock). Never logged: passwords,
+tokens, secrets, encryption keys, message contents.
+
+## Break-glass / dual control
+
+- **Sudo** is same-user step-up (password or passkey), not dual-control.
+- **GDPR erase** requires `users.delete` in addition to `users.disable` + sudo, and always
+  creates a **pending approval** — a *different* admin with `approvals.manage` must approve
+  (also with sudo) before Synapse erase runs.
+- **Mass deactivate / mass erase / bulk device revoke (≥5)** use the same dual-approval queue
+  (`pending_approvals`). UI: **Approvals** nav item. Audit actions:
+  `APPROVAL_REQUESTED`, `APPROVAL_APPROVED`, `APPROVAL_REJECTED`, `APPROVAL_CANCELLED`.
+- Single-user deactivate (without erase) still executes immediately under sudo.
+
+## Admin SSO / OIDC
+
+Deferred design stub: see [MAS-OIDC.md](./MAS-OIDC.md). Login shows a “coming soon” SSO
+affordance; `GET /api/auth/oidc` reports configuration readiness from `ADMIN_OIDC_*` env vars.
+Local password + MFA remains the break-glass path.
 
 ## Matrix / E2EE boundaries
 

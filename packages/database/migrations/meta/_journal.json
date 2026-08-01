@@ -22,6 +22,20 @@
       "when": 1785592000000,
       "tag": "0002_matrix_user_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785592186669,
+      "tag": "0003_modern_harpoon",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785600000000,
+      "tag": "0004_wave5_approvals_invites",
+      "breakpoints": true
     }
   ]
 }

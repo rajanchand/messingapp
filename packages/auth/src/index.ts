@@ -33,6 +33,7 @@ export {
 } from "./sessions";
 export {
   loginWithPassword,
+  applyMandatoryMfaPolicy,
   verifyMfaChallenge,
   reauthenticate,
   MAX_FAILED_LOGINS,
@@ -48,6 +49,10 @@ export {
   type TotpEnrollment,
   type TotpConfirmation,
 } from "./mfa";
+export {
+  MFA_REQUIRED_PERMISSIONS,
+  permissionsRequireMfa,
+} from "./mfa-policy";
 export {
   startWebAuthnRegistration,
   finishWebAuthnRegistration,

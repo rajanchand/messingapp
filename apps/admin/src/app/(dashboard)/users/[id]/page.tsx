@@ -57,9 +57,13 @@ export default function UserDetailPage() {
   const [resetOpen, setResetOpen] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [deactivateOpen, setDeactivateOpen] = useState(false);
+  const [eraseOnDeactivate, setEraseOnDeactivate] = useState(false);
   const [reactivateOpen, setReactivateOpen] = useState(false);
   const [reactivatePassword, setReactivatePassword] = useState("");
   const [logoutAllOpen, setLogoutAllOpen] = useState(false);
+  const [shadowBanOpen, setShadowBanOpen] = useState(false);
+  const [noticeOpen, setNoticeOpen] = useState(false);
+  const [noticeBody, setNoticeBody] = useState("");
   const [rolesOpen, setRolesOpen] = useState(false);
   const [selectedRoles, setSelectedRoles] = useState<string[]>([]);
 
@@ -173,6 +177,7 @@ export default function UserDetailPage() {
                 <ShieldCheck className="mr-1 size-3" /> Server admin
               </Badge>
             ) : null}
+            {user.shadow_banned ? <Badge variant="destructive">Shadow-banned</Badge> : null}
             {detail.data?.roles.map((r) => (
               <Badge key={r.slug} variant="outline">
                 {r.name}
@@ -202,6 +207,23 @@ export default function UserDetailPage() {
           {canDisable && !user.deactivated ? (
             <Button variant="outline" size="sm" onClick={() => setLogoutAllOpen(true)}>
               <LogOut /> Logout all devices
+            </Button>
+          ) : null}
+          {canDisable && !user.deactivated ? (
+            <Button variant="outline" size="sm" onClick={() => setShadowBanOpen(true)}>
+              {user.shadow_banned ? "Clear shadow-ban" : "Shadow-ban"}
+            </Button>
+          ) : null}
+          {canUpdate && !user.deactivated ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setNoticeBody("");
+                setNoticeOpen(true);
+              }}
+            >
+              Server notice
             </Button>
           ) : null}
           {canManageRoles ? (
@@ -441,15 +463,42 @@ export default function UserDetailPage() {
       {/* Deactivate */}
       <ConfirmDialog
         open={deactivateOpen}
-        onOpenChange={setDeactivateOpen}
+        onOpenChange={(o) => {
+          setDeactivateOpen(o);
+          if (!o) setEraseOnDeactivate(false);
+        }}
         title={`Deactivate ${userId}?`}
-        description="The user will be logged out everywhere and unable to sign in. Reactivation requires setting a new password."
-        confirmLabel="Deactivate"
+        description={
+          <div className="space-y-3">
+            <p>
+              The user will be logged out everywhere and unable to sign in. Reactivation requires
+              setting a new password.
+            </p>
+            {permissions.has("users.delete") ? (
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1 size-4"
+                  checked={eraseOnDeactivate}
+                  onChange={(e) => setEraseOnDeactivate(e.target.checked)}
+                />
+                <span>
+                  Permanently erase profile data (GDPR).{" "}
+                  <span className="font-medium text-destructive">
+                    Irreversible — removes profile and redacts message metadata on the homeserver.
+                  </span>
+                </span>
+              </label>
+            ) : null}
+          </div>
+        }
+        confirmLabel={eraseOnDeactivate ? "Deactivate & erase" : "Deactivate"}
         destructive
         requireReauth
         onConfirm={async () => {
-          await api.post(`/api/users/${encodedId}/deactivate`, { erase: false });
-          toast.success("User deactivated.");
+          await api.post(`/api/users/${encodedId}/deactivate`, { erase: eraseOnDeactivate });
+          toast.success(eraseOnDeactivate ? "User deactivated and erased." : "User deactivated.");
+          setEraseOnDeactivate(false);
           refresh();
         }}
       />
@@ -500,6 +549,61 @@ export default function UserDetailPage() {
           await api.post(`/api/users/${encodedId}/logout-all`);
           toast.success("All sessions terminated.");
           queryClient.invalidateQueries({ queryKey: ["user", userId, "devices"] });
+        }}
+      />
+
+      <ConfirmDialog
+        open={shadowBanOpen}
+        onOpenChange={setShadowBanOpen}
+        title={user.shadow_banned ? "Clear shadow-ban?" : "Shadow-ban user?"}
+        description={
+          user.shadow_banned
+            ? "The user will be able to send messages normally again."
+            : "Shadow-banned users appear to send messages but recipients do not receive them."
+        }
+        confirmLabel={user.shadow_banned ? "Clear shadow-ban" : "Shadow-ban"}
+        destructive={!user.shadow_banned}
+        requireReauth
+        onConfirm={async () => {
+          await api.post(`/api/users/${encodedId}/shadow-ban`, {
+            shadowBanned: !user.shadow_banned,
+          });
+          toast.success(user.shadow_banned ? "Shadow-ban cleared." : "User shadow-banned.");
+          refresh();
+        }}
+      />
+
+      <ConfirmDialog
+        open={noticeOpen}
+        onOpenChange={(o) => {
+          setNoticeOpen(o);
+          if (!o) setNoticeBody("");
+        }}
+        title="Send server notice?"
+        description={
+          <div className="space-y-3 pt-2">
+            <p>Delivers a server notice to {userId} via the Synapse Admin API.</p>
+            <div className="space-y-2">
+              <Label htmlFor="notice-body">Message</Label>
+              <Input
+                id="notice-body"
+                value={noticeBody}
+                onChange={(e) => setNoticeBody(e.target.value)}
+                placeholder="Maintenance window tonight…"
+              />
+            </div>
+          </div>
+        }
+        confirmLabel="Send"
+        requireReauth
+        onConfirm={async () => {
+          if (!noticeBody.trim()) {
+            toast.error("Enter a message.");
+            throw new Error("empty");
+          }
+          await api.post("/api/server-notices", { userId, body: noticeBody });
+          toast.success("Server notice sent.");
+          setNoticeBody("");
         }}
       />
 

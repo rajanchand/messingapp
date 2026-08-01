@@ -9,7 +9,7 @@ import {
 } from "@simplewebauthn/server";
 import { and, eq } from "drizzle-orm";
 import type { Database } from "@zts/database";
-import { adminUsers, webauthnCredentials } from "@zts/database";
+import { adminUsers, mfaCredentials, webauthnCredentials } from "@zts/database";
 
 export interface WebAuthnRpConfig {
   rpID: string;
@@ -86,6 +86,12 @@ export async function finishWebAuthnRegistration(
     nickname: nickname ?? null,
   });
 
+  // Passkeys satisfy the mandatory MFA policy for privileged admins.
+  await db
+    .update(adminUsers)
+    .set({ mfaEnabled: true, updatedAt: new Date() })
+    .where(eq(adminUsers.id, userId));
+
   return verification;
 }
 
@@ -161,4 +167,25 @@ export async function deleteWebAuthnCredential(db: Database, userId: string, cre
     .where(
       and(eq(webauthnCredentials.userId, userId), eq(webauthnCredentials.credentialId, credentialId)),
     );
+
+  const remaining = await db
+    .select({ id: webauthnCredentials.id })
+    .from(webauthnCredentials)
+    .where(eq(webauthnCredentials.userId, userId))
+    .limit(1);
+  if (remaining.length === 0) {
+    const totp = (
+      await db
+        .select({ verifiedAt: mfaCredentials.verifiedAt })
+        .from(mfaCredentials)
+        .where(eq(mfaCredentials.userId, userId))
+        .limit(1)
+    )[0];
+    if (!totp?.verifiedAt) {
+      await db
+        .update(adminUsers)
+        .set({ mfaEnabled: false, updatedAt: new Date() })
+        .where(eq(adminUsers.id, userId));
+    }
+  }
 }

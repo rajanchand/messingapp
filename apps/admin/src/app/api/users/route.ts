@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
   getDb,
@@ -55,7 +56,10 @@ export const GET = createApiHandler(
 
 const createBodySchema = z.object({
   localpart: z.string().min(1).max(255),
-  password: z.string().min(1).max(128),
+  /** Optional when generateTemporary is true. */
+  password: z.string().min(1).max(128).optional(),
+  /** Auto-generate a strong temporary password (returned once + emailed if welcome on). */
+  generateTemporary: z.boolean().default(false),
   displayName: z.string().min(1).max(256),
   email: z.string().email().max(320),
   phone: z.string().max(32).optional().or(z.literal("")),
@@ -67,6 +71,15 @@ const createBodySchema = z.object({
   admin: z.boolean().default(false),
   sendWelcomeEmail: z.boolean().default(true),
 });
+
+function generateTemporaryPassword(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
+  const bytes = randomBytes(20);
+  let out = "";
+  for (let i = 0; i < 20; i++) out += alphabet[bytes[i]! % alphabet.length];
+  // Ensure complexity classes for password policy.
+  return `Aa1!${out}`;
+}
 
 function normalizePhone(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
@@ -85,7 +98,11 @@ export const POST = createApiHandler(
         "Username may only contain lowercase letters, digits, and . _ = - /",
       );
     }
-    const policy = checkPasswordPolicy(body.password);
+
+    const password =
+      body.generateTemporary || !body.password ? generateTemporaryPassword() : body.password;
+    const temporaryGenerated = body.generateTemporary || !body.password;
+    const policy = checkPasswordPolicy(password);
     if (!policy.ok) return jsonError(400, "weak_password", policy.errors.join(" "));
 
     const env = getEnv();
@@ -123,7 +140,7 @@ export const POST = createApiHandler(
     }
 
     const created = await synapse.createOrModifyUser(userId, {
-      password: body.password,
+      password,
       displayname: displayName,
       admin: body.admin,
       threepids,
@@ -177,7 +194,7 @@ export const POST = createApiHandler(
         displayName,
         matrixUserId: userId,
         localpart,
-        password: body.password,
+        password,
         department,
         subdepartment,
         employeeId,
@@ -200,6 +217,7 @@ export const POST = createApiHandler(
         employeeId,
         roleSlug,
         welcomeEmailSent: emailResult.sent,
+        temporaryPassword: temporaryGenerated,
       },
     });
 
@@ -215,15 +233,9 @@ export const POST = createApiHandler(
     return jsonOk(
       {
         user: created,
-        profile: {
-          email,
-          phone: phone ?? null,
-          employeeId,
-          department,
-          subdepartment,
-          roleSlug,
-        },
         welcomeEmail: emailResult,
+        /** Only returned when auto-generated — operator should copy once. */
+        temporaryPassword: temporaryGenerated ? password : undefined,
       },
       { status: 201 },
     );

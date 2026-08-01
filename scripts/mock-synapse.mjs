@@ -28,6 +28,30 @@ const devices = new Map();
 const rooms = new Map();
 /** @type {Map<string, Map<string, any>>} roomId -> userId -> membership */
 const roomMembers = new Map();
+/** @type {Map<number, any>} */
+const eventReports = new Map();
+/** @type {Map<string, any>} media key = server/mediaId */
+const mediaStore = new Map();
+/** @type {Map<string, any>} */
+const federationDestinations = new Map();
+/** @type {Map<string, string>} alias -> roomId */
+const aliases = new Map();
+/** @type {Map<string, string>} roomId -> public|private */
+const directoryVisibility = new Map();
+/** Mutable mock homeserver policy */
+let homeserverPolicy = {
+  registration_enabled: false,
+  federation_enabled: true,
+  guests_allowed: false,
+  public_room_directory_enabled: true,
+  rate_limits: {
+    messages_per_second: 10,
+    registration_per_second: 1,
+    login_per_second: 5,
+    notes: "Mock Synapse policy — editable via Admin API.",
+  },
+};
+let nextReportId = 1;
 
 function seedUser(localpart, { admin = false, deactivated = false, displayname } = {}) {
   const userId = `@${localpart}:${SERVER_NAME}`;
@@ -104,6 +128,79 @@ seedUser("bob", { displayname: "Bob" });
 seedUser("carol", { displayname: "Carol", deactivated: true });
 seedRoom("general", { name: "General" });
 seedRoom("ops", { name: "Ops", encryption: false });
+// Seed public directory + alias map from seeded rooms
+for (const [roomId, room] of rooms) {
+  if (room.canonical_alias) aliases.set(room.canonical_alias, roomId);
+  directoryVisibility.set(roomId, room.public ? "public" : "private");
+}
+// Make general public for directory demos
+{
+  const general = rooms.get(`!general:${SERVER_NAME}`);
+  if (general) {
+    general.public = true;
+    directoryVisibility.set(general.room_id, "public");
+  }
+}
+
+eventReports.set(nextReportId, {
+  id: nextReportId,
+  user_id: `@bob:${SERVER_NAME}`,
+  room_id: `!general:${SERVER_NAME}`,
+  event_id: `$evt_report_1`,
+  score: -100,
+  reason: "Spam",
+  received_ts: Date.now() - 86_400_000,
+  sender: `@carol:${SERVER_NAME}`,
+  event_json: { type: "m.room.message", content: { body: "[redacted]" } },
+});
+nextReportId += 1;
+eventReports.set(nextReportId, {
+  id: nextReportId,
+  user_id: `@alice:${SERVER_NAME}`,
+  room_id: `!ops:${SERVER_NAME}`,
+  event_id: `$evt_report_2`,
+  score: -50,
+  reason: "Harassment",
+  received_ts: Date.now() - 3_600_000,
+  sender: `@bob:${SERVER_NAME}`,
+  event_json: { type: "m.room.message", content: { body: "[redacted]" } },
+});
+
+mediaStore.set(`${SERVER_NAME}/abc123`, {
+  media_id: "abc123",
+  media_type: "image/png",
+  media_length: 12_345,
+  upload_name: "avatar.png",
+  created_ts: Date.now() - 7_200_000,
+  quarantined_by: null,
+  user_id: `@alice:${SERVER_NAME}`,
+  room_id: `!general:${SERVER_NAME}`,
+});
+mediaStore.set(`${SERVER_NAME}/def456`, {
+  media_id: "def456",
+  media_type: "image/jpeg",
+  media_length: 99_000,
+  upload_name: "photo.jpg",
+  created_ts: Date.now() - 1_800_000,
+  quarantined_by: `@alice:${SERVER_NAME}`,
+  user_id: `@bob:${SERVER_NAME}`,
+  room_id: `!ops:${SERVER_NAME}`,
+});
+
+federationDestinations.set("matrix.org", {
+  destination: "matrix.org",
+  retry_last_ts: null,
+  retry_interval: null,
+  failure_ts: null,
+  last_successful_stream_ordering: 1000,
+});
+federationDestinations.set("example.com", {
+  destination: "example.com",
+  retry_last_ts: Date.now() - 60_000,
+  retry_interval: 60_000,
+  failure_ts: Date.now() - 120_000,
+  last_successful_stream_ordering: null,
+});
 
 function json(res, status, body) {
   const payload = JSON.stringify(body);
@@ -199,6 +296,7 @@ const server = createServer(async (req, res) => {
         if (body.admin !== undefined) user.admin = body.admin;
         if (body.deactivated !== undefined) user.deactivated = body.deactivated;
         if (body.locked !== undefined) user.locked = body.locked;
+        if (body.shadow_banned !== undefined) user.shadow_banned = body.shadow_banned;
         if (body.threepids !== undefined) {
           user.threepids = Array.isArray(body.threepids)
             ? body.threepids.map((t) => ({
@@ -358,6 +456,7 @@ const server = createServer(async (req, res) => {
       const encryption =
         Array.isArray(body.initial_state) &&
         body.initial_state.some((e) => e.type === "m.room.encryption");
+      const roomType = body.creation_content?.type === "m.space" ? "m.space" : null;
       rooms.set(roomId, {
         room_id: roomId,
         name: body.name ?? null,
@@ -375,8 +474,15 @@ const server = createServer(async (req, res) => {
         guest_access: "can_join",
         history_visibility: "joined",
         state_events: 8,
-        room_type: null,
+        room_type: roomType,
+        aliases: body.room_alias_name ? [`#${body.room_alias_name}:${SERVER_NAME}`] : [],
       });
+      if (body.room_alias_name) {
+        aliases.set(`#${body.room_alias_name}:${SERVER_NAME}`, roomId);
+      }
+      if (body.visibility === "public") {
+        directoryVisibility.set(roomId, "public");
+      }
       const memberMap = new Map([
         [
           creator,
@@ -400,6 +506,97 @@ const server = createServer(async (req, res) => {
       syncRoomCounts(roomId);
       json(res, 200, { room_id: roomId });
       return;
+    }
+
+    // --- Public room directory ---
+    if (req.method === "GET" && path === "/_matrix/client/v3/publicRooms") {
+      const limit = Number(url.searchParams.get("limit") ?? 25);
+      const publicRooms = [...rooms.values()]
+        .filter((r) => r.public || directoryVisibility.get(r.room_id) === "public")
+        .map((r) => ({
+          room_id: r.room_id,
+          name: r.name,
+          topic: r.topic,
+          canonical_alias: r.canonical_alias,
+          num_joined_members: r.joined_members,
+          world_readable: false,
+          guest_can_join: true,
+          join_rule: r.join_rules,
+          room_type: r.room_type,
+        }));
+      json(res, 200, {
+        chunk: publicRooms.slice(0, limit),
+        total_room_count_estimate: publicRooms.length,
+      });
+      return;
+    }
+
+    const dirListMatch = path.match(/^\/_matrix\/client\/v3\/directory\/list\/room\/([^/]+)$/);
+    if (dirListMatch) {
+      const roomId = decodeURIComponent(dirListMatch[1]);
+      if (!rooms.has(roomId)) return notFound(res);
+      if (req.method === "GET") {
+        json(res, 200, { visibility: directoryVisibility.get(roomId) ?? (rooms.get(roomId).public ? "public" : "private") });
+        return;
+      }
+      if (req.method === "PUT") {
+        const body = await readBody(req);
+        directoryVisibility.set(roomId, body.visibility === "public" ? "public" : "private");
+        const room = rooms.get(roomId);
+        if (room) room.public = body.visibility === "public";
+        json(res, 200, {});
+        return;
+      }
+    }
+
+    const aliasMatch = path.match(/^\/_matrix\/client\/v3\/directory\/room\/([^/]+)$/);
+    if (aliasMatch) {
+      const alias = decodeURIComponent(aliasMatch[1]);
+      if (req.method === "GET") {
+        const roomId = aliases.get(alias);
+        if (!roomId) return notFound(res);
+        json(res, 200, { room_id: roomId, servers: [SERVER_NAME] });
+        return;
+      }
+      if (req.method === "PUT") {
+        const body = await readBody(req);
+        aliases.set(alias, body.room_id);
+        const room = rooms.get(body.room_id);
+        if (room) {
+          room.aliases = [...new Set([...(room.aliases ?? []), alias])];
+          if (!room.canonical_alias) room.canonical_alias = alias;
+        }
+        json(res, 200, {});
+        return;
+      }
+      if (req.method === "DELETE") {
+        const roomId = aliases.get(alias);
+        aliases.delete(alias);
+        if (roomId && rooms.has(roomId)) {
+          const room = rooms.get(roomId);
+          room.aliases = (room.aliases ?? []).filter((a) => a !== alias);
+          if (room.canonical_alias === alias) room.canonical_alias = room.aliases[0] ?? null;
+        }
+        json(res, 200, {});
+        return;
+      }
+    }
+
+    // --- Homeserver policy (mock only) ---
+    if (path === "/_synapse/admin/v1/homeserver_policy") {
+      if (req.method === "GET") {
+        json(res, 200, { ...homeserverPolicy, source: "mock" });
+        return;
+      }
+      if (req.method === "PUT") {
+        const body = await readBody(req);
+        Object.assign(homeserverPolicy, body);
+        if (body.rate_limits) {
+          homeserverPolicy.rate_limits = { ...homeserverPolicy.rate_limits, ...body.rate_limits };
+        }
+        json(res, 200, { ...homeserverPolicy, source: "mock" });
+        return;
+      }
     }
 
     const kickMatch = path.match(/^\/_matrix\/client\/v3\/rooms\/([^/]+)\/kick$/);
@@ -485,6 +682,109 @@ const server = createServer(async (req, res) => {
       if (!rooms.has(decodeURIComponent(sendMatch[1]))) return notFound(res);
       await readBody(req);
       json(res, 200, { event_id: `$msg_${Date.now()}` });
+      return;
+    }
+
+    // --- Event reports ---
+    if (req.method === "GET" && path === "/_synapse/admin/v1/event_reports") {
+      const all = [...eventReports.values()].sort((a, b) => b.received_ts - a.received_ts);
+      json(res, 200, { event_reports: all, total: all.length });
+      return;
+    }
+    const reportMatch = path.match(/^\/_synapse\/admin\/v1\/event_reports\/([^/]+)$/);
+    if (reportMatch) {
+      const id = Number(reportMatch[1]);
+      const report = eventReports.get(id);
+      if (!report) return notFound(res);
+      if (req.method === "GET") {
+        json(res, 200, report);
+        return;
+      }
+      if (req.method === "DELETE") {
+        eventReports.delete(id);
+        json(res, 200, {});
+        return;
+      }
+    }
+
+    // --- Media ---
+    const userMediaMatch = path.match(/^\/_synapse\/admin\/v1\/users\/([^/]+)\/media$/);
+    if (req.method === "GET" && userMediaMatch) {
+      const userId = decodeURIComponent(userMediaMatch[1]);
+      const local = [...mediaStore.values()].filter((m) => m.user_id === userId);
+      json(res, 200, { local, total: local.length });
+      return;
+    }
+    const roomMediaMatch = path.match(/^\/_synapse\/admin\/v1\/room\/([^/]+)\/media$/);
+    if (req.method === "GET" && roomMediaMatch) {
+      const roomId = decodeURIComponent(roomMediaMatch[1]);
+      const local = [...mediaStore.values()].filter((m) => m.room_id === roomId);
+      json(res, 200, { local, total: local.length });
+      return;
+    }
+    const quarantineMatch = path.match(
+      /^\/_synapse\/admin\/v1\/media\/quarantine\/([^/]+)\/([^/]+)$/,
+    );
+    if (req.method === "POST" && quarantineMatch) {
+      const key = `${decodeURIComponent(quarantineMatch[1])}/${decodeURIComponent(quarantineMatch[2])}`;
+      const item = mediaStore.get(key);
+      if (!item) return notFound(res);
+      await readBody(req);
+      item.quarantined_by = `@alice:${SERVER_NAME}`;
+      json(res, 200, {});
+      return;
+    }
+    const unquarantineMatch = path.match(
+      /^\/_synapse\/admin\/v1\/media\/unquarantine\/([^/]+)\/([^/]+)$/,
+    );
+    if (req.method === "POST" && unquarantineMatch) {
+      const key = `${decodeURIComponent(unquarantineMatch[1])}/${decodeURIComponent(unquarantineMatch[2])}`;
+      const item = mediaStore.get(key);
+      if (!item) return notFound(res);
+      await readBody(req);
+      item.quarantined_by = null;
+      json(res, 200, {});
+      return;
+    }
+    const deleteMediaMatch = path.match(/^\/_synapse\/admin\/v1\/media\/([^/]+)\/([^/]+)$/);
+    if (req.method === "DELETE" && deleteMediaMatch) {
+      const key = `${decodeURIComponent(deleteMediaMatch[1])}/${decodeURIComponent(deleteMediaMatch[2])}`;
+      if (!mediaStore.has(key)) return notFound(res);
+      mediaStore.delete(key);
+      json(res, 200, {});
+      return;
+    }
+
+    // --- Federation ---
+    if (req.method === "GET" && path === "/_synapse/admin/v1/federation/destinations") {
+      const destinations = [...federationDestinations.values()];
+      json(res, 200, { destinations, total: destinations.length });
+      return;
+    }
+    const destMatch = path.match(/^\/_synapse\/admin\/v1\/federation\/destinations\/([^/]+)$/);
+    if (req.method === "GET" && destMatch) {
+      const dest = federationDestinations.get(decodeURIComponent(destMatch[1]));
+      if (!dest) return notFound(res);
+      json(res, 200, dest);
+      return;
+    }
+
+    // --- Server notice ---
+    if (req.method === "POST" && path === "/_synapse/admin/v1/send_server_notice") {
+      await readBody(req);
+      json(res, 200, { event_id: `$notice_${Date.now()}` });
+      return;
+    }
+
+    // --- Make room admin ---
+    const makeAdminMatch = path.match(
+      /^\/_synapse\/admin\/v1\/rooms\/([^/]+)\/make_room_admin$/,
+    );
+    if (req.method === "POST" && makeAdminMatch) {
+      const roomId = decodeURIComponent(makeAdminMatch[1]);
+      if (!rooms.has(roomId)) return notFound(res);
+      await readBody(req);
+      json(res, 200, {});
       return;
     }
 

@@ -49,6 +49,18 @@ export const TRIGGERS: TriggerDefinition[] = [
     payloadFields: ["type", "severity", "ip", "userId"],
   },
   {
+    type: "LOGIN_BURST_FAILURES",
+    label: "Login burst failures",
+    description: "Fires when an IP or account exceeds failed-login thresholds.",
+    payloadFields: ["ip", "username", "failures", "windowMinutes"],
+  },
+  {
+    type: "NEW_DEVICE_SEEN",
+    label: "New device seen",
+    description: "Fires when a Matrix user appears with a new device (when detected).",
+    payloadFields: ["userId", "deviceId", "ip"],
+  },
+  {
     type: "WEBHOOK_RECEIVED",
     label: "Inbound webhook",
     description: "Fires when an inbound webhook endpoint receives a valid delivery.",
@@ -125,6 +137,34 @@ export const ACTIONS: ActionDefinition[] = [
     privileged: true,
     configFields: ["roomId", "userId", "reason"],
   },
+  {
+    type: "BAN_USER",
+    label: "Ban from room",
+    description: "Ban a user from a room.",
+    privileged: true,
+    configFields: ["roomId", "userId", "reason"],
+  },
+  {
+    type: "UNBAN_USER",
+    label: "Unban from room",
+    description: "Unban a user from a room.",
+    privileged: true,
+    configFields: ["roomId", "userId"],
+  },
+  {
+    type: "SHADOW_BAN_USER",
+    label: "Shadow-ban user",
+    description: "Shadow-ban (or clear) a Matrix user.",
+    privileged: true,
+    configFields: ["userId", "shadowBanned"],
+  },
+  {
+    type: "BLOCK_IP",
+    label: "Block IP",
+    description: "Add an IP/CIDR to the admin-panel denylist (Security Centre).",
+    privileged: true,
+    configFields: ["cidr", "reason", "ttlMinutes"],
+  },
 ];
 
 export function getTrigger(type: string): TriggerDefinition | undefined {
@@ -148,4 +188,7 @@ export type TriggerType = (typeof TRIGGER_TYPES)[number];
 export const DESTRUCTIVE_ACTION_TYPES = [
   "DEACTIVATE_USER",
   "KICK_USER",
+  "BAN_USER",
+  "SHADOW_BAN_USER",
+  "BLOCK_IP",
 ] as const satisfies readonly ActionType[];

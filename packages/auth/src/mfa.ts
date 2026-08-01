@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { Database } from "@zts/database";
-import { adminUsers, mfaCredentials, recoveryCodes, securityEvents } from "@zts/database";
+import { adminUsers, mfaCredentials, recoveryCodes, securityEvents, webauthnCredentials } from "@zts/database";
 import { encryptSecret, decryptSecret } from "./secret-encryption";
 import { buildOtpauthUrl, generateTotpSecret, verifyTotpCode } from "./totp";
 import { generateRecoveryCodes } from "./recovery-codes";
@@ -77,13 +77,22 @@ export async function confirmTotpEnrollment(
 export async function disableTotp(db: Database, userId: string): Promise<void> {
   await db.delete(mfaCredentials).where(eq(mfaCredentials.userId, userId));
   await db.delete(recoveryCodes).where(eq(recoveryCodes.userId, userId));
-  await db
-    .update(adminUsers)
-    .set({ mfaEnabled: false, updatedAt: new Date() })
-    .where(eq(adminUsers.id, userId));
-  await db.insert(securityEvents).values({
-    type: "MFA_DISABLED",
-    severity: "warning",
-    userId,
-  });
+
+  const passkeys = await db
+    .select({ id: webauthnCredentials.id })
+    .from(webauthnCredentials)
+    .where(eq(webauthnCredentials.userId, userId))
+    .limit(1);
+
+  if (passkeys.length === 0) {
+    await db
+      .update(adminUsers)
+      .set({ mfaEnabled: false, updatedAt: new Date() })
+      .where(eq(adminUsers.id, userId));
+    await db.insert(securityEvents).values({
+      type: "MFA_DISABLED",
+      severity: "warning",
+      userId,
+    });
+  }
 }

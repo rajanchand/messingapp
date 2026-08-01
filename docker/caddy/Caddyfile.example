@@ -1,8 +1,16 @@
 # ============================================================
-# Reverse proxy skeleton for the admin panel (Phase 6).
-# IMPORTANT: This file is an EXAMPLE. Inspect your existing VPS
-# reverse proxy configuration before deploying - do not replace
-# the config that currently serves chat.zero-trust-security.org.
+# Reverse proxy example for the admin panel.
+# IMPORTANT: Inspect your existing VPS reverse proxy before deploying.
+# Do not replace the config that serves chat.zero-trust-security.org.
+#
+# Checklist (also in docs/DEPLOYMENT.md):
+# [ ] Dedicated vhost for ADMIN_DOMAIN only
+# [ ] TLS 1.2+ / ACME
+# [ ] HSTS
+# [ ] Proxy to 127.0.0.1:3000
+# [ ] Forward X-Forwarded-For
+# [ ] Preserve Host / Origin (CSRF)
+# [ ] Smoke-test /api/health after reload
 # ============================================================
 
 admin.chat.zero-trust-security.org {
@@ -21,5 +29,6 @@ admin.chat.zero-trust-security.org {
 	# The admin app listens on localhost only.
 	reverse_proxy 127.0.0.1:3000 {
 		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
 	}
 }
