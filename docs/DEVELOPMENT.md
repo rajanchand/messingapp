@@ -76,6 +76,9 @@ pnpm db:generate   # regenerate Drizzle migrations after schema changes
 make docker-build  # build the production image locally
 ```
 
+For a durable production-mode admin on `:3100` (`output: 'standalone'`), use `make admin-up` / `admin-down` / `admin-status` instead of `pnpm start` in Cursor agent shells: those terminals are ephemeral and will kill foreground Node. `admin-up` expects an existing `make build`, links `public` + `.next/static` into the standalone tree, double-forks `node server.js` with `apps/admin/.env.local` and `PORT=3100`, and writes `/tmp/zts-admin-3100.pid` + `/tmp/zts-admin-3100.log`.
+
+
 ## Conventions
 
 - TypeScript strict; no `any` unless unavoidable and justified.
