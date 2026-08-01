@@ -1,0 +1,33 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": [".next/**", "!.next/cache/**", "dist/**"],
+      "env": [
+        "NODE_ENV",
+        "APP_NAME",
+        "APP_LOGO",
+        "APP_FAVICON",
+        "SUPPORT_EMAIL",
+        "ADMIN_DOMAIN",
+        "MATRIX_HOMESERVER",
+        "MATRIX_SERVER_NAME",
+        "MATRIX_ADMIN_TOKEN",
+        "DATABASE_URL",
+        "REDIS_URL",
+        "SESSION_SECRET"
+      ]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"]
+    },
+    "test": {
+      "dependsOn": []
+    }
+  }
+}

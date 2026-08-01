@@ -1,0 +1,57 @@
+# Local development stack: dedicated app database + Redis.
+# Uses non-default host ports (5433/6380) so it can never clash with an
+# existing Matrix PostgreSQL. NEVER points at the Synapse database.
+services:
+  zts-postgres:
+    image: postgres:16-alpine
+    container_name: zts-postgres
+    environment:
+      POSTGRES_USER: zts
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: zts
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - zts_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zts -d zts"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zts-redis:
+    image: redis:7-alpine
+    container_name: zts-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - zts_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zts-automation-worker:
+    build:
+      context: .
+      dockerfile: workers/automation/Dockerfile
+    container_name: zts-automation-worker
+    depends_on:
+      zts-postgres:
+        condition: service_healthy
+      zts-redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://zts:change-me@zts-postgres:5432/zts
+      REDIS_URL: redis://zts-redis:6379
+      SESSION_SECRET: local-dev-session-secret-min-32-chars!!
+      MATRIX_HOMESERVER: ${MATRIX_HOMESERVER:-https://chat.example.org}
+      MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:-example.org}
+      MATRIX_ADMIN_TOKEN: ${MATRIX_ADMIN_TOKEN:-replace-me}
+    restart: unless-stopped
+
+volumes:
+  zts_postgres_data:
+  zts_redis_data:

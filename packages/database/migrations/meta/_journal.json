@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1785586151949,
+      "tag": "0000_calm_red_shift",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785589501493,
+      "tag": "0001_tearful_rocket_raccoon",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785592000000,
+      "tag": "0002_matrix_user_profiles",
+      "breakpoints": true
+    }
+  ]
+}

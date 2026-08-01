@@ -1,0 +1,88 @@
+# ============================================================
+# Production deployment skeleton (Phase 6 completes this).
+#
+# SAFETY:
+# - Never exposes PostgreSQL or Redis publicly.
+# - Never touches the existing matrix-synapse / matrix-postgres
+#   containers or their volumes.
+# - The admin panel reaches Synapse over its public HTTPS URL by
+#   default; to use the internal Docker network instead, attach
+#   the existing Matrix network below and set
+#   MATRIX_HOMESERVER=http://matrix-synapse:8008
+#
+# Usage:
+#   docker compose -f docker-compose.production.yml pull
+#   docker compose -f docker-compose.production.yml run --rm zts-migrate
+#   docker compose -f docker-compose.production.yml up -d
+# ============================================================
+services:
+  zts-admin:
+    image: ghcr.io/YOUR_GITHUB_USERNAME/zts-admin:latest
+    container_name: zts-admin
+    restart: unless-stopped
+    env_file: .env.production
+    depends_on:
+      zts-postgres:
+        condition: service_healthy
+      zts-redis:
+        condition: service_healthy
+    networks:
+      - zts-internal
+      # - matrix   # uncomment to reach Synapse over the internal network
+    ports:
+      # Bind to localhost only; the reverse proxy terminates TLS on 443.
+      - "127.0.0.1:3000:3000"
+
+  zts-migrate:
+    image: ghcr.io/YOUR_GITHUB_USERNAME/zts-admin-migrator:latest
+    profiles: ["tools"]
+    env_file: .env.production
+    depends_on:
+      zts-postgres:
+        condition: service_healthy
+    networks:
+      - zts-internal
+
+  zts-postgres:
+    image: postgres:16-alpine
+    container_name: zts-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${ZTS_DB_USER:-zts}
+      POSTGRES_PASSWORD: ${ZTS_DB_PASSWORD:?set ZTS_DB_PASSWORD}
+      POSTGRES_DB: ${ZTS_DB_NAME:-zts}
+    volumes:
+      - zts_postgres_data:/var/lib/postgresql/data
+    networks:
+      - zts-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ZTS_DB_USER:-zts} -d ${ZTS_DB_NAME:-zts}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zts-redis:
+    image: redis:7-alpine
+    container_name: zts-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - zts_redis_data:/data
+    networks:
+      - zts-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  zts-internal:
+    driver: bridge
+  # matrix:
+  #   external: true
+  #   name: <existing-matrix-docker-network-name>
+
+volumes:
+  zts_postgres_data:
+  zts_redis_data:

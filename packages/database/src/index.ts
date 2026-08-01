@@ -1,0 +1,41 @@
+export * as schema from "./schema";
+export {
+  adminUsers,
+  sessions,
+  roles,
+  permissions,
+  rolePermissions,
+  userRoles,
+  matrixUserRoles,
+  loginAttempts,
+  securityEvents,
+  auditLogs,
+  mfaCredentials,
+  recoveryCodes,
+  appSettings,
+  ipBlocks,
+  notificationPreferences,
+  notifications,
+  webauthnCredentials,
+  matrixBotSettings,
+  workflows,
+  workflowVersions,
+  workflowRuns,
+  workflowRunSteps,
+  webhookEndpoints,
+  webhookDeliveries,
+  integrations,
+  integrationSecrets,
+  integrationLogs,
+  aiProposals,
+  matrixUserProfiles,
+} from "./schema";
+export { getDb, type Database } from "./client";
+export { seedRbac } from "./seed";
+export {
+  PERMISSIONS,
+  ALL_PERMISSIONS,
+  SYSTEM_ROLES,
+  type Permission,
+  type SystemRoleDefinition,
+} from "./rbac-catalog";

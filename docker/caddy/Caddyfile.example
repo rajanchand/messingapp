@@ -1,0 +1,25 @@
+# ============================================================
+# Reverse proxy skeleton for the admin panel (Phase 6).
+# IMPORTANT: This file is an EXAMPLE. Inspect your existing VPS
+# reverse proxy configuration before deploying - do not replace
+# the config that currently serves chat.zero-trust-security.org.
+# ============================================================
+
+admin.chat.zero-trust-security.org {
+	# TLS via Let's Encrypt is automatic with Caddy.
+
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# The admin app listens on localhost only.
+	reverse_proxy 127.0.0.1:3000 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
